@@ -1,0 +1,51 @@
+name: Build Android APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Put files into their folders
+        run: |
+          mkdir -p lib/data lib/screens lib/util test tool
+          mvif() { [ -f "$1" ] && mv "$1" "$2" || true; }
+          mvif main.dart lib/
+          mvif ui.dart lib/
+          mvif models.dart lib/data/
+          mvif store.dart lib/data/
+          mvif kiosk_screen.dart lib/screens/
+          mvif manager_screen.dart lib/screens/
+          mvif camera_screen.dart lib/screens/
+          mvif format.dart lib/util/
+          mvif hours.dart lib/util/
+          mvif security.dart lib/util/
+          mvif hours_test.dart test/
+          mvif setup.dart tool/
+          find lib test tool -type f
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create Android project files and add camera settings
+        run: dart run tool/setup.dart
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: crew-clock-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
