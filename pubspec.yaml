@@ -1,0 +1,26 @@
+name: crew_clock
+description: Staff clock in and clock out with worker ID, PIN and photo.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  camera: ^0.11.0
+  sqflite: ^2.3.3
+  path_provider: ^2.1.4
+  path: ^1.9.0
+  crypto: ^3.0.5
+  file_picker: ^8.1.2
+  wakelock_plus: ^1.2.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
