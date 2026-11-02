@@ -18,14 +18,17 @@ jobs:
           mvif ui.dart lib/
           mvif models.dart lib/data/
           mvif store.dart lib/data/
+          mvif sync.dart lib/data/
           mvif kiosk_screen.dart lib/screens/
           mvif manager_screen.dart lib/screens/
           mvif camera_screen.dart lib/screens/
+          mvif sync_settings.dart lib/screens/
           mvif format.dart lib/util/
           mvif hours.dart lib/util/
           mvif security.dart lib/util/
           mvif hours_test.dart test/
           mvif setup.dart tool/
+          mvif brand.py tool/
           find lib test tool -type f
 
       - uses: actions/setup-java@v4
@@ -40,6 +43,17 @@ jobs:
 
       - name: Create Android project files and add camera settings
         run: dart run tool/setup.dart
+
+      - name: Add Jaybel Office Choice branding (logo, icon, launch screen)
+        run: |
+          mkdir -p assets/brand
+          B=https://jaybel.officechoice.com.au/Themes/BPDTHEME01/theme-client-updates
+          [ -f logo-white.png ] || curl -fsSL -A "Mozilla/5.0" -o assets/brand/logo-white.png "$B/img/logos/logo-wide-transparent.png" || echo "white logo download failed"
+          [ -f logo-red.png ] || curl -fsSL -A "Mozilla/5.0" -o assets/brand/logo-red.png "$B/img/logos/logo-wide.png" || echo "red logo download failed"
+          [ -f icon.png ] || curl -fsSL -A "Mozilla/5.0" -o assets/brand/icon.png "$B/apple-touch-icon.png" || echo "icon download failed"
+          pip install --quiet pillow
+          python3 tool/brand.py
+          ls -la assets/brand
 
       - name: Build all plugins against Android SDK 36
         run: |

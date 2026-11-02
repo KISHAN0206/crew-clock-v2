@@ -27,8 +27,10 @@ Future<void> main() async {
   if (manifest.existsSync()) {
     var m = manifest.readAsStringSync();
     m = m.replaceFirst(RegExp(r'android:label="[^"]*"'), 'android:label="Crew Clock"');
-    if (!m.contains('android.permission.CAMERA')) {
-      m = m.replaceFirst('<application', '<uses-permission android:name="android.permission.CAMERA" />\n    <application');
+    for (final perm in ['android.permission.CAMERA', 'android.permission.INTERNET']) {
+      if (!m.contains(perm)) {
+        m = m.replaceFirst('<application', '<uses-permission android:name="$perm" />\n    <application');
+      }
     }
     manifest.writeAsStringSync(m);
   }

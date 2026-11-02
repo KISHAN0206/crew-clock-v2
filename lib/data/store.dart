@@ -25,6 +25,10 @@ class Store extends ChangeNotifier {
   List<Punch> punches = []; // newest first
   String? _adminSalt;
   String? _adminHash;
+  final Map<String, String?> _settings = {};
+
+  /// Called whenever a record is waiting to upload (set by the sync service).
+  VoidCallback? onQueued;
 
   bool get hasAdminPin => _adminHash != null;
 
@@ -35,7 +39,10 @@ class Store extends ChangeNotifier {
 
     _db = await openDatabase(
       p.join(docs.path, 'crew_clock.db'),
-      version: 1,
+      version: 2,
+      onUpgrade: (db, oldVersion, _) async {
+        if (oldVersion < 2) await _createSyncQueue(db);
+      },
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE workers(
@@ -47,10 +54,14 @@ class Store extends ChangeNotifier {
             type TEXT NOT NULL, at INTEGER NOT NULL, photo TEXT)''');
         await db.execute('CREATE INDEX punches_worker_at ON punches(worker_id, at)');
         await db.execute('CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT)');
+        await _createSyncQueue(db);
       },
     );
     await _load();
   }
+
+  static Future<void> _createSyncQueue(Database db) => db.execute(
+      'CREATE TABLE IF NOT EXISTS sync_queue(id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, created_at INTEGER NOT NULL)');
 
   Future<void> _load() async {
     workers
@@ -62,6 +73,9 @@ class Store extends ChangeNotifier {
     punches = (await _db.query('punches', orderBy: 'at DESC')).map(Punch.fromMap).toList();
     final s = await _db.query('settings');
     final map = {for (final r in s) r['key'] as String: r['value'] as String?};
+    _settings
+      ..clear()
+      ..addAll(map);
     _adminSalt = map['admin_salt'];
     _adminHash = map['admin_hash'];
     notifyListeners();
@@ -121,6 +135,7 @@ class Store extends ChangeNotifier {
     await _db.insert('workers', w.toMap());
     workers[w.id] = w;
     notifyListeners();
+    await _enqueue(_workerPayload(w));
     return w;
   }
 
@@ -139,6 +154,7 @@ class Store extends ChangeNotifier {
     w.setupAt = DateTime.now().millisecondsSinceEpoch;
     await _saveWorker(w);
     if (old != null && old != w.idPhoto) await _deletePhoto(old);
+    await _enqueue(_workerPayload(w, withPhoto: true));
   }
 
   /// Clears PIN and ID photo so the worker goes through setup again.
@@ -150,11 +166,13 @@ class Store extends ChangeNotifier {
     w.setupAt = null;
     await _saveWorker(w);
     await _deletePhoto(old);
+    await _enqueue(_workerPayload(w));
   }
 
   Future<void> setActive(Worker w, bool active) async {
     w.active = active;
     await _saveWorker(w);
+    await _enqueue(_workerPayload(w));
   }
 
   bool checkWorkerPin(Worker w, String pin) => w.isSetUp && hashPin(w.pinSalt!, pin) == w.pinHash;
@@ -169,12 +187,15 @@ class Store extends ChangeNotifier {
   }
 
   Future<Punch> addPunch(Worker w, String type, Uint8List photo) async {
+    final previous = lastPunch(w.id);
     final name = await _savePhoto(photo);
     final punch = Punch(workerId: w.id, name: w.name, type: type, at: DateTime.now().millisecondsSinceEpoch, photo: name);
     final id = await _db.insert('punches', punch.toMap());
     final saved = Punch(id: id, workerId: punch.workerId, name: punch.name, type: punch.type, at: punch.at, photo: punch.photo);
     punches.insert(0, saved);
     notifyListeners();
+    final hours = (!saved.isIn && previous != null && previous.isIn) ? (saved.at - previous.at) / 3600000.0 : null;
+    await _enqueue(_punchPayload(saved, hours));
     return saved;
   }
 
@@ -182,6 +203,97 @@ class Store extends ChangeNotifier {
     final f = from.millisecondsSinceEpoch, t = to.millisecondsSinceEpoch;
     return punches.where((p) => p.at >= f && p.at < t && (workerId == null || p.workerId == workerId)).toList();
   }
+
+  // ---------- cloud sync (Google Sheet) ----------
+
+  /// The tablet link to the Google Sheet script, or null when cloud sync is off.
+  String? get sheetUrl => _settings['sheet_url'];
+
+  Future<void> _setSetting(String key, String? value) async {
+    if (value == null) {
+      await _db.delete('settings', where: 'key = ?', whereArgs: [key]);
+    } else {
+      await _db.insert('settings', {'key': key, 'value': value}, conflictAlgorithm: ConflictAlgorithm.replace);
+    }
+    _settings[key] = value;
+  }
+
+  /// Turns cloud sync on (with a link) or off (null). Turning it off clears anything waiting to upload.
+  Future<void> setSheetUrl(String? url) async {
+    await _setSetting('sheet_url', url);
+    if (url == null) await _db.delete('sync_queue');
+    notifyListeners();
+  }
+
+  Map<String, Object?> _workerPayload(Worker w, {bool withPhoto = false}) => {
+        'type': 'worker',
+        'id': w.id,
+        'name': w.name,
+        'role': w.role,
+        'status': !w.active ? 'Switched off' : (w.isSetUp ? 'Active' : 'Setup needed'),
+        'added': fmtIsoDate(DateTime.fromMillisecondsSinceEpoch(w.createdAt)),
+        if (withPhoto && w.idPhoto != null) 'photo_file': w.idPhoto,
+      };
+
+  Map<String, Object?> _punchPayload(Punch p, double? shiftHours) {
+    final t = p.time;
+    final weekStart = DateTime(t.year, t.month, t.day - (t.weekday - 1));
+    return {
+      'type': 'punch',
+      'ref': 'P-${p.workerId}-${p.at}',
+      'id': p.workerId,
+      'name': p.name,
+      'punch': p.isIn ? 'IN' : 'OUT',
+      'date': fmtIsoDate(t),
+      'time': fmtTime(t),
+      'week': fmtIsoDate(weekStart),
+      'hours': shiftHours == null ? '' : double.parse(shiftHours.toStringAsFixed(2)),
+      'at': t.toIso8601String(),
+      if (p.photo != null) 'photo_file': p.photo,
+    };
+  }
+
+  Future<void> _enqueue(Map<String, Object?> payload, {bool notify = true}) async {
+    if (sheetUrl == null) return; // cloud sync is off
+    await _db.insert('sync_queue', {'payload': jsonEncode(payload), 'created_at': DateTime.now().millisecondsSinceEpoch});
+    if (notify) onQueued?.call();
+  }
+
+  /// Queues every worker and punch, for the first upload after cloud sync is turned on.
+  /// The sheet ignores punches it already has, so running this twice is safe.
+  Future<int> enqueueEverything() async {
+    if (sheetUrl == null) return 0;
+    var n = 0;
+    for (final w in workers.values) {
+      await _enqueue(_workerPayload(w, withPhoto: true), notify: false);
+      n++;
+    }
+    final oldestFirst = [...punches]..sort((a, b) => a.at.compareTo(b.at));
+    final openIn = <String, Punch>{};
+    for (final p in oldestFirst) {
+      double? hours;
+      if (p.isIn) {
+        openIn[p.workerId] = p;
+      } else {
+        final start = openIn.remove(p.workerId);
+        if (start != null) hours = (p.at - start.at) / 3600000.0;
+      }
+      await _enqueue(_punchPayload(p, hours), notify: false);
+      n++;
+    }
+    onQueued?.call();
+    return n;
+  }
+
+  Future<int> pendingUploads() async =>
+      Sqflite.firstIntValue(await _db.rawQuery('SELECT COUNT(*) FROM sync_queue')) ?? 0;
+
+  Future<List<({int id, String payload})>> nextUploads(int limit) async {
+    final rows = await _db.query('sync_queue', orderBy: 'id', limit: limit);
+    return [for (final r in rows) (id: (r['id'] as num).toInt(), payload: r['payload'] as String)];
+  }
+
+  Future<void> markUploaded(int id) => _db.delete('sync_queue', where: 'id = ?', whereArgs: [id]);
 
   // ---------- export / backup ----------
 

@@ -6,27 +6,64 @@ import 'package:flutter/material.dart';
 import 'data/models.dart';
 import 'data/store.dart';
 
-/// Brand colours, matched to the web version.
+/// Jaybel Office Choice brand colours (from jaybel.officechoice.com.au).
 class AppColors {
-  static const accent = Color(0xFF0B5F6B);
-  static const ink = Color(0xFF13212C);
-  static const bg = Color(0xFFE9EDF1);
-  static const line = Color(0xFFD3DAE1);
-  static const muted = Color(0xFF5B6B78);
-  static const inGreen = Color(0xFF1E7A45);
-  static const inBg = Color(0xFFE2F2E8);
-  static const outAmber = Color(0xFFA4530B);
-  static const outBg = Color(0xFFFBEBDD);
-  static const err = Color(0xFFB42318);
-  static const errBg = Color(0xFFFDECEA);
+  static const brandRed = Color(0xFFDA291C); // header, primary buttons
+  static const brandYellow = Color(0xFFF6BE00); // "Consider it sorted." yellow
+  static const accent = brandRed;
+  static const ink = Color(0xFF231F20); // Office Choice charcoal
+  static const bg = Color(0xFFF2F0EF); // warm grey page
+  static const line = Color(0xFFDDD8D5);
+  static const muted = Color(0xFF6B6461);
+  static const inGreen = Color(0xFF3E8468); // site's button green
+  static const inBg = Color(0xFFE2EFE9);
+  static const outAmber = Color(0xFF9A5A00);
+  static const outBg = Color(0xFFFDF1CC);
+  static const err = Color(0xFF9F1D14);
+  static const errBg = Color(0xFFFBE3E1);
+}
+
+/// Logo files added by the build (downloaded from the Office Choice site).
+class BrandAssets {
+  static const logoWhite = 'assets/brand/logo-white.png'; // white + yellow text, for red backgrounds
+  static const logoRed = 'assets/brand/logo-red.png'; // logo on its red panel, for light backgrounds
+}
+
+/// Office Choice logo with a text fallback if the image isn't in the build.
+class BrandLogo extends StatelessWidget {
+  const BrandLogo({super.key, this.height = 40, this.onRed = true});
+  final double height;
+  final bool onRed;
+
+  @override
+  Widget build(BuildContext context) => Image.asset(
+        onRed ? BrandAssets.logoWhite : BrandAssets.logoRed,
+        height: height,
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => Text.rich(
+          TextSpan(children: [
+            TextSpan(text: 'office', style: TextStyle(color: onRed ? AppColors.brandYellow : AppColors.brandRed)),
+            TextSpan(text: 'choice', style: TextStyle(color: onRed ? Colors.white : AppColors.ink)),
+          ]),
+          style: TextStyle(fontSize: height * .55, fontWeight: FontWeight.w800, letterSpacing: -.5),
+        ),
+      );
 }
 
 ThemeData buildTheme() {
-  final scheme = ColorScheme.fromSeed(seedColor: AppColors.accent, primary: AppColors.accent, surface: Colors.white);
+  final scheme = ColorScheme.fromSeed(
+    seedColor: AppColors.brandRed,
+    primary: AppColors.brandRed,
+    secondary: AppColors.brandYellow,
+    surface: Colors.white,
+    onSurface: AppColors.ink,
+  );
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
     scaffoldBackgroundColor: AppColors.bg,
+    progressIndicatorTheme: const ProgressIndicatorThemeData(color: AppColors.brandRed),
+    snackBarTheme: const SnackBarThemeData(backgroundColor: AppColors.ink, behavior: SnackBarBehavior.floating),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: AppColors.bg,

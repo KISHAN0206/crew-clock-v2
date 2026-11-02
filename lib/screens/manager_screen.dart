@@ -10,6 +10,7 @@ import '../data/store.dart';
 import '../ui.dart';
 import '../util/format.dart';
 import '../util/hours.dart';
+import 'sync_settings.dart';
 
 /// Manager side: PIN-protected. Add workers, start their setup, see timesheets, export and back up.
 class ManagerScreen extends StatefulWidget {
@@ -192,6 +193,7 @@ class _ManagerBodyState extends State<_ManagerBody> {
                 ),
               ),
               Wrap(spacing: 6, runSpacing: 6, children: [
+                const SyncButton(),
                 _smallButton(Icons.save_alt, 'Back up', _backup),
                 _smallButton(Icons.restore, 'Restore', _restore),
                 _smallButton(Icons.lock_outline, 'Lock manager', widget.onLock),

@@ -52,3 +52,21 @@ tool/setup.dart             one-time platform setup
 - Records live only on this tablet. Use **Back up** regularly and keep the file somewhere else (Google Drive, email).
 - To change the ID prefix, edit `idPrefix` in `lib/data/store.dart`.
 - If `flutter pub get` reports a version conflict, run `flutter pub upgrade`.
+
+## Cloud sync (Google Sheet)
+
+Manager → **Cloud sync** sends every clock-in, clock-out and worker change to a Google Sheet
+(tabs: Weekly hours, Punches, Workers; photos in a private Drive folder "Crew Clock photos").
+The sheet side is a Google Apps Script (`Code.gs`, kept outside this repo because it holds the sync key).
+Records queue on the tablet when offline and upload when the connection is back.
+
+## Branding
+
+Styled for Jaybel Office Choice. The GitHub build downloads the logo and icon from
+jaybel.officechoice.com.au and `tool/brand.py` sets the app icon and Android launch screen.
+Colours live in `AppColors` in `lib/ui.dart`.
+
+## GitHub build
+
+Every push to `main` runs `.github/workflows/build.yml` and attaches the APK as the
+**crew-clock-apk** artifact on the run.
