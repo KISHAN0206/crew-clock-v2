@@ -3,11 +3,13 @@
 Staff clock in / clock out for a shared tablet.
 
 - **Manager** (PIN-protected): add workers. Each gets an ID like `JB-4821`.
-- **First-day setup**: the worker creates their own 4-digit PIN and takes an ID photo on the tablet.
-- **Clock in / out**: worker ID + PIN, then a live front-camera photo, then punch. Clocking out shows the shift length.
-- **Timesheet**: hours per worker (today, this week, last week, all), punch log with ID photo beside each punch photo, CSV export.
-- **Back up / Restore**: one `.json` file with all workers, punches and photos.
-- Everything is stored on the tablet (SQLite + photo files). Works offline. The screen stays awake.
+- **Clock in / out by QR**: the worker taps their name on the tablet, a one-time QR code appears, and they scan it
+  with their own phone. The Google Sheet script records the punch and decides IN or OUT.
+- **Phone linking**: a worker's first scan links their phone. After that only that phone works for them, and a phone
+  can't clock in for anyone else. Reset a link from Manager → Workers → Reset phone link (or clear it in the sheet).
+- QR codes expire after 90 seconds and work once.
+- **Timesheet** on the tablet (hours per worker, punch log, CSV export) and in the Google Sheet (Weekly hours tab).
+- Needs internet on the tablet and on workers' phones.
 
 ## Run it
 
@@ -55,10 +57,10 @@ tool/setup.dart             one-time platform setup
 
 ## Cloud sync (Google Sheet)
 
-Manager → **Cloud sync** sends every clock-in, clock-out and worker change to a Google Sheet
+Manager → **Cloud sync** connects the tablet to the Google Sheet. QR scans are recorded there, and worker changes are sent from the tablet
 (tabs: Weekly hours, Punches, Workers; photos in a private Drive folder "Crew Clock photos").
 The sheet side is a Google Apps Script (`Code.gs`, kept outside this repo because it holds the sync key).
-Records queue on the tablet when offline and upload when the connection is back.
+Worker changes queue on the tablet when offline and upload when the connection is back.
 
 ## Branding
 

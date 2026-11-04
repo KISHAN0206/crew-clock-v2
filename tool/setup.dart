@@ -1,4 +1,4 @@
-// One-time setup: generates the Android and iOS folders and adds the camera settings.
+// One-time setup: generates the Android and iOS folders and sets the app name and permissions.
 // Run from the project folder:  dart run tool/setup.dart
 import 'dart:io';
 
@@ -27,7 +27,7 @@ Future<void> main() async {
   if (manifest.existsSync()) {
     var m = manifest.readAsStringSync();
     m = m.replaceFirst(RegExp(r'android:label="[^"]*"'), 'android:label="Crew Clock"');
-    for (final perm in ['android.permission.CAMERA', 'android.permission.INTERNET']) {
+    for (final perm in ['android.permission.INTERNET']) {
       if (!m.contains(perm)) {
         m = m.replaceFirst('<application', '<uses-permission android:name="$perm" />\n    <application');
       }
@@ -38,7 +38,7 @@ Future<void> main() async {
     final f = File(path);
     if (!f.existsSync()) continue;
     var g = f.readAsStringSync();
-    // The camera plugin needs Android 7.0 (API 24) or newer.
+    // Android 7.0 (API 24) or newer.
     g = g.replaceAllMapped(RegExp(r'minSdk(Version)?\s*=?\s*(flutter\.minSdkVersion|\d+)'), (m) {
       final current = int.tryParse(m.group(2)!);
       if (current != null && current >= 24) return m.group(0)!;
@@ -47,7 +47,7 @@ Future<void> main() async {
     f.writeAsStringSync(g);
   }
 
-  stdout.writeln('3/4  iOS: camera permission text and app name...');
+  stdout.writeln('3/4  iOS: app name...');
   final plist = File('ios/Runner/Info.plist');
   if (plist.existsSync()) {
     var p = plist.readAsStringSync();
@@ -56,8 +56,6 @@ Future<void> main() async {
       final i = p.lastIndexOf('</dict>');
       p = '${p.substring(0, i)}\t<key>$key</key>\n\t$valueXml\n${p.substring(i)}';
     }
-    addKey('NSCameraUsageDescription', '<string>Crew Clock takes a photo when staff clock in or out, and an ID photo at setup.</string>');
-    addKey('NSMicrophoneUsageDescription', '<string>Crew Clock does not record audio.</string>');
     addKey('NSPhotoLibraryUsageDescription', '<string>Crew Clock saves backups and timesheet exports where you choose.</string>');
     addKey('UIFileSharingEnabled', '<true/>');
     p = p.replaceFirstMapped(RegExp(r'(<key>CFBundleDisplayName</key>\s*<string>)[^<]*(</string>)'),

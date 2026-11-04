@@ -186,6 +186,20 @@ class Store extends ChangeNotifier {
     return null;
   }
 
+  /// Saves a punch the Google Sheet already recorded from a QR scan (so it isn't uploaded again).
+  Future<Punch> recordScannedPunch(Worker w, String type, int at) async {
+    final existing = punches.where((p) => p.workerId == w.id && p.at == at);
+    if (existing.isNotEmpty) return existing.first;
+    final punch = Punch(workerId: w.id, name: w.name, type: type, at: at);
+    final id = await _db.insert('punches', punch.toMap());
+    final saved = Punch(id: id, workerId: w.id, name: w.name, type: type, at: at);
+    punches
+      ..add(saved)
+      ..sort((a, b) => b.at.compareTo(a.at));
+    notifyListeners();
+    return saved;
+  }
+
   Future<Punch> addPunch(Worker w, String type, Uint8List photo) async {
     final previous = lastPunch(w.id);
     final name = await _savePhoto(photo);
@@ -230,7 +244,7 @@ class Store extends ChangeNotifier {
         'id': w.id,
         'name': w.name,
         'role': w.role,
-        'status': !w.active ? 'Switched off' : (w.isSetUp ? 'Active' : 'Setup needed'),
+        'status': w.active ? 'Active' : 'Switched off',
         'added': fmtIsoDate(DateTime.fromMillisecondsSinceEpoch(w.createdAt)),
         if (withPhoto && w.idPhoto != null) 'photo_file': w.idPhoto,
       };

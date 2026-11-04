@@ -2,9 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 
+import '../util/security.dart';
+import 'models.dart';
 import 'store.dart';
 
 /// Uploads clock-ins, clock-outs and worker details to the Google Sheet.
@@ -76,6 +79,32 @@ class SyncService extends ChangeNotifier with WidgetsBindingObserver {
       _running = false;
       await _count();
     }
+  }
+
+  /// A one-time QR link for [w]: the worker opens it on their phone to clock in or out.
+  /// Signed with the sync key so the sheet knows it came from this tablet. Valid for [life].
+  ({String url, String token, DateTime expires})? qrFor(Worker w, {Duration life = const Duration(seconds: 90)}) {
+    final link = store.sheetUrl;
+    if (link == null) return null;
+    final base = Uri.parse(link);
+    final key = base.queryParameters['key'];
+    if (key == null || key.isEmpty) return null;
+    final token = randomString('ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789', 20);
+    final expires = DateTime.now().add(life);
+    final x = expires.millisecondsSinceEpoch.toString();
+    final sig = Hmac(sha256, utf8.encode(key)).convert(utf8.encode('$token|${w.id}|${w.name}|$x')).toString();
+    final url = Uri(
+      scheme: base.scheme,
+      host: base.host,
+      path: base.path,
+      queryParameters: {'a': 'scan', 't': token, 'w': w.id, 'n': w.name, 'x': x, 's': sig},
+    ).toString();
+    return (url: url, token: token, expires: expires);
+  }
+
+  /// Removes the phone link for a worker in the sheet, so their next scan links a new phone.
+  Future<void> unlinkPhone(Worker w) async {
+    await send({'type': 'unlink', 'id': w.id});
   }
 
   /// Posts one record to the sheet script and returns its JSON reply.
