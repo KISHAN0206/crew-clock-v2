@@ -71,7 +71,7 @@ class _KioskScreenState extends State<KioskScreen> {
   /// Checks often during the working day and rarely overnight.
   Duration get _pollEvery {
     final h = DateTime.now().hour;
-    return (h >= 5 && h < 21) ? const Duration(seconds: 3) : const Duration(seconds: 30);
+    return h >= 5 ? const Duration(seconds: 3) : const Duration(seconds: 30);
   }
 
   Future<void> _poll() async {
