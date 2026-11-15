@@ -85,8 +85,24 @@ jobs:
           fi
           head -12 build.gradle*
 
+      - name: Sign with the permanent Crew Clock key
+        env:
+          CREWCLOCK_KEYSTORE: ${{ secrets.CREWCLOCK_KEYSTORE }}
+        run: |
+          if [ -z "$CREWCLOCK_KEYSTORE" ]; then
+            echo "::warning::CREWCLOCK_KEYSTORE secret is missing. This APK uses a temporary key and won't install over an existing Crew Clock."
+            exit 0
+          fi
+          echo "$CREWCLOCK_KEYSTORE" | base64 -d > android/app/crewclock.jks
+          python3 tool/signing.py
+
       - name: Build APK
-        run: flutter build apk --release
+        env:
+          CREWCLOCK_KEY_PASSWORD: ${{ secrets.CREWCLOCK_KEY_PASSWORD }}
+        run: |
+          flutter build apk --release
+          echo "Signing certificate:"
+          keytool -printcert -jarfile build/app/outputs/flutter-apk/app-release.apk | grep -E "SHA256|Owner" || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
