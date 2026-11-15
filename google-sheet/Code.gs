@@ -15,7 +15,8 @@
  * Setup (one time):
  *   1. Paste this whole file into Extensions → Apps Script, then Save.
  *   2. Choose the "setup" function at the top and press Run. Allow access when asked.
- *      (Setup also adds a small timer that keeps the script awake so scans are fast.)
+ *      (Setup also adds a timer that keeps the script awake so scans are fast, builds the
+ *      Summary tab for the owner, and refreshes it every 10 minutes.)
  *   3. Deploy → New deployment → type "Web app".
  *        Execute as: Me      Who has access: Anyone
  *      Press Deploy and copy the Web app URL.
@@ -46,6 +47,10 @@ function setup() {
   ensureSheets_(ss);
   getFolder_();
   installKeepWarm_();
+  ss.setSpreadsheetTimeZone(TZ);
+  installSummaryTrigger_();
+  formatTabs();
+  refreshSummary();
   Logger.log('Setup done. Now deploy as a Web app. Your sync key is: ' + SYNC_KEY);
 }
 
@@ -298,7 +303,8 @@ function recordPunch_(ss, workers, row, id, name, now) {
   const date = Utilities.formatDate(d, TZ, 'yyyy-MM-dd');
   const time = Utilities.formatDate(d, TZ, 'h:mm a').toLowerCase();
   const week = Utilities.formatDate(new Date(now - (dow - 1) * 86400000), TZ, 'yyyy-MM-dd');
-  punches.appendRow([date, time, week, text_(id), text_(name), punch, hours, '', d.toISOString(), 'P-' + id + '-' + now]);
+  punches.appendRow([Utilities.parseDate(date, TZ, 'yyyy-MM-dd'), time, Utilities.parseDate(week, TZ, 'yyyy-MM-dd'),
+    text_(id), text_(name), punch, hours, '', d.toISOString(), 'P-' + id + '-' + now]);
   workers.getRange(row, W_LAST, 1, 2).setValues([[punch, now]]);
   const result = { ok: true, punch: punch, name: name, id: id, time: time, date: date, hours: hours, at: now };
   pushRecent_(result);
@@ -566,4 +572,395 @@ function text_(v) {
 
 function out_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ---------------- Owner report: the Summary tab ----------------
+
+const BRAND = { red: '#DA291C', yellow: '#F6BE00', ink: '#231F20', grey: '#F2F0EF', line: '#DDD8D5', muted: '#6B6461', green: '#3E8468', greenBg: '#E2EFE9', amber: '#9A5A00', amberBg: '#FDF1CC', errBg: '#FBE3E1', err: '#9F1D14' };
+const PERIODS = ['This week', 'Last week', 'This month', 'Last month', 'Last 7 days', 'Last 30 days', 'Custom dates'];
+const LONG_SHIFT_HOURS = 12; // shifts longer than this are flagged
+const FORGOT_OUT_HOURS = 14; // still clocked in after this long: probably forgot to clock out
+
+/** Adds the Crew Clock menu and refreshes the Summary when the sheet is opened. */
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('Crew Clock')
+    .addItem('Refresh summary', 'refreshSummary')
+    .addItem('Tidy up all tabs', 'formatTabs')
+    .addToUi();
+  try { refreshSummary(); } catch (e) {}
+}
+
+/** Changing the period on the Summary tab rebuilds it straight away. */
+function onEdit(e) {
+  try {
+    const r = e && e.range;
+    if (!r || r.getSheet().getName() !== 'Summary') return;
+    const a1 = r.getA1Notation();
+    if (a1 === 'C6' || a1 === 'H6' || a1 === 'J6') refreshSummary();
+  } catch (err) {}
+}
+
+function installSummaryTrigger_() {
+  const exists = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'refreshSummary'; });
+  if (!exists) ScriptApp.newTrigger('refreshSummary').timeBased().everyMinutes(10).create();
+}
+
+const dayKey_ = function (ms) { return Utilities.formatDate(new Date(ms), TZ, 'yyyy-MM-dd'); };
+const keyToDate_ = function (k) { return Utilities.parseDate(k, TZ, 'yyyy-MM-dd'); };
+const addDays_ = function (k, n) { return dayKey_(keyToDate_(k).getTime() + n * 86400000 + 12 * 3600000); };
+const hm_ = function (h) { const m = Math.round(h * 60); return Math.floor(m / 60) + ':' + ('0' + (m % 60)).slice(-2); };
+const when_ = function (ms) { return Utilities.formatDate(new Date(ms), TZ, 'EEE d MMM, h:mm a').replace('AM', 'am').replace('PM', 'pm'); };
+
+/** Start and end day keys (inclusive) for the chosen period. */
+function periodRange_(period, customFrom, customTo) {
+  const today = dayKey_(Date.now());
+  const dow = Number(Utilities.formatDate(new Date(), TZ, 'u'));
+  const monday = addDays_(today, -(dow - 1));
+  const monthStart = today.slice(0, 8) + '01';
+  const prevMonthEnd = addDays_(monthStart, -1);
+  switch (period) {
+    case 'Last week': return [addDays_(monday, -7), addDays_(monday, -1)];
+    case 'This month': return [monthStart, addDays_(addDays_(monthStart, 32).slice(0, 8) + '01', -1)];
+    case 'Last month': return [prevMonthEnd.slice(0, 8) + '01', prevMonthEnd];
+    case 'Last 7 days': return [addDays_(today, -6), today];
+    case 'Last 30 days': return [addDays_(today, -29), today];
+    case 'Custom dates': {
+      const f = customFrom instanceof Date ? dayKey_(customFrom.getTime() + 12 * 3600000) : '';
+      const t = customTo instanceof Date ? dayKey_(customTo.getTime() + 12 * 3600000) : '';
+      if (f && t && f <= t) return [f, t];
+      return [monday, addDays_(monday, 6)];
+    }
+    default: return [monday, addDays_(monday, 6)];
+  }
+}
+
+/** Pairs every clock-in with the next clock-out, per worker. */
+function allShifts_(ss) {
+  const sh = ss.getSheetByName('Punches');
+  if (!sh || sh.getLastRow() < 2) return [];
+  const rows = sh.getRange(2, 1, sh.getLastRow() - 1, 9).getValues();
+  const punches = [];
+  rows.forEach(function (r) {
+    const at = Date.parse(r[8]) || 0;
+    if (!at || !r[3]) return;
+    punches.push({ id: String(r[3]), name: String(r[4]), type: String(r[5]), at: at });
+  });
+  punches.sort(function (a, b) { return a.at - b.at; });
+  const open = {}, shifts = [];
+  punches.forEach(function (p) {
+    if (p.type === 'IN') {
+      if (open[p.id]) shifts.push({ id: p.id, name: open[p.id].name, in: open[p.id].at, out: 0, hours: 0, open: false, missingOut: true });
+      open[p.id] = p;
+    } else if (p.type === 'OUT' && open[p.id]) {
+      const st = open[p.id];
+      shifts.push({ id: p.id, name: st.name, in: st.at, out: p.at, hours: (p.at - st.at) / 3600000, open: false });
+      delete open[p.id];
+    }
+  });
+  Object.keys(open).forEach(function (id) {
+    shifts.push({ id: id, name: open[id].name, in: open[id].at, out: 0, hours: 0, open: true });
+  });
+  return shifts;
+}
+
+/** Works out the numbers for the Summary tab. Kept separate from the drawing so it can be tested. */
+function summaryData_(ss, period, customFrom, customTo) {
+  const range = periodRange_(period, customFrom, customTo);
+  const from = range[0], to = range[1];
+  const wsh = ss.getSheetByName('Workers');
+  const people = {};
+  if (wsh && wsh.getLastRow() > 1) {
+    wsh.getRange(2, 1, wsh.getLastRow() - 1, 4).getValues().forEach(function (r) {
+      if (r[0]) people[String(r[0])] = { id: String(r[0]), name: String(r[1]), role: String(r[2]), status: String(r[3] || 'Active') };
+    });
+  }
+  const shifts = allShifts_(ss);
+  const now = Date.now();
+  const rows = {};
+  const ensure = function (id, name) {
+    if (!rows[id]) {
+      const p = people[id] || { id: id, name: name, role: '', status: 'Active' };
+      rows[id] = { id: id, name: p.name || name, role: p.role, status: p.status, shifts: 0, hours: 0, days: {}, daily: {}, firstIn: 0, lastOut: 0, onShift: false };
+    }
+    return rows[id];
+  };
+  Object.keys(people).forEach(function (id) { if (people[id].status !== 'Switched off') ensure(id, people[id].name); });
+
+  const attention = [];
+  shifts.forEach(function (s) {
+    const k = dayKey_(s.in);
+    if (s.open) {
+      ensure(s.id, s.name).onShift = true;
+      const hrs = (now - s.in) / 3600000;
+      if (hrs > FORGOT_OUT_HOURS) attention.push({ name: s.name, issue: 'Still clocked in after ' + hm_(hrs) + ' h. Probably forgot to clock out.', when: when_(s.in) });
+      return;
+    }
+    if (k < from || k > to) return;
+    if (s.missingOut) {
+      attention.push({ name: s.name, issue: 'Clocked in twice without clocking out. This shift has no hours.', when: when_(s.in) });
+      return;
+    }
+    const r = ensure(s.id, s.name);
+    r.shifts++;
+    r.hours += s.hours;
+    r.days[k] = true;
+    r.daily[k] = (r.daily[k] || 0) + s.hours;
+    if (!r.firstIn || s.in < r.firstIn) r.firstIn = s.in;
+    if (s.out > r.lastOut) r.lastOut = s.out;
+    if (s.hours > LONG_SHIFT_HOURS) attention.push({ name: s.name, issue: 'Long shift: ' + hm_(s.hours) + ' h. Check the clock-out time.', when: when_(s.in) });
+  });
+
+  const list = Object.keys(rows).map(function (id) { return rows[id]; })
+    .sort(function (a, b) { return (b.hours - a.hours) || a.name.localeCompare(b.name); });
+  const days = [];
+  for (let k = from; k <= to && days.length < 62; k = addDays_(k, 1)) days.push(k);
+  return {
+    from: from, to: to, days: days, list: list, attention: attention,
+    totalHours: list.reduce(function (t, r) { return t + r.hours; }, 0),
+    totalShifts: list.reduce(function (t, r) { return t + r.shifts; }, 0),
+    worked: list.filter(function (r) { return r.shifts > 0; }).length,
+    onShift: list.filter(function (r) { return r.onShift; }).length,
+  };
+}
+
+/** Rebuilds the Summary tab. Runs on open, when the period changes, and every 10 minutes. */
+function refreshSummary() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureSheets_(ss);
+  let sh = ss.getSheetByName('Summary');
+  let period = 'This week', customFrom = '', customTo = '';
+  if (sh) {
+    period = String(sh.getRange('C6').getValue() || 'This week');
+    customFrom = sh.getRange('H6').getValue();
+    customTo = sh.getRange('J6').getValue();
+  } else {
+    sh = ss.insertSheet('Summary', 0);
+  }
+  if (PERIODS.indexOf(period) < 0) period = 'This week';
+  const d = summaryData_(ss, period, customFrom, customTo);
+
+  sh.getCharts().forEach(function (c) { sh.removeChart(c); });
+  sh.clear();
+  sh.clearConditionalFormatRules();
+  sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations().setFontFamily('Roboto').setFontColor(BRAND.ink).setVerticalAlignment('middle');
+  sh.setHiddenGridlines(true);
+  const cols = 12 + Math.max(0, d.days.length - 10);
+  if (sh.getMaxColumns() < cols + 2) sh.insertColumnsAfter(sh.getMaxColumns(), cols + 2 - sh.getMaxColumns());
+  sh.setColumnWidth(1, 16);
+  sh.setColumnWidth(2, 190);
+  const widths = { 3: 130, 4: 110, 5: 80, 6: 80, 7: 100, 8: 100, 9: 90, 10: 160, 11: 160, 12: 100 };
+  for (let c = 3; c <= cols + 1; c++) sh.setColumnWidth(c, widths[c] || 64);
+
+  // Header band
+  const band = sh.getRange(1, 1, 4, cols + 1);
+  band.setBackground(BRAND.red);
+  sh.getRange(1, 2).setValue('JAYBEL OFFICE CHOICE').setFontColor(BRAND.yellow).setFontSize(10).setFontWeight('bold');
+  sh.getRange(2, 2).setValue('Staff hours').setFontColor('#FFFFFF').setFontSize(22).setFontWeight('bold');
+  sh.getRange(3, 2).setValue('Crew Clock timesheet · updated ' + when_(Date.now()) + ' · refreshes every 10 minutes')
+    .setFontColor('#FFFFFF').setFontSize(10);
+  sh.getRange(4, 1, 1, cols + 1).setBackground(BRAND.yellow);
+  sh.setRowHeight(1, 24); sh.setRowHeight(2, 40); sh.setRowHeight(3, 22); sh.setRowHeight(4, 4);
+
+  // Period picker
+  sh.getRange('B6').setValue('PERIOD').setFontSize(9).setFontWeight('bold').setFontColor(BRAND.muted).setHorizontalAlignment('right');
+  sh.getRange('C6:D6').merge().setValue(period).setFontWeight('bold').setBackground('#FFFFFF')
+    .setBorder(true, true, true, true, false, false, BRAND.red, SpreadsheetApp.BorderStyle.SOLID_MEDIUM)
+    .setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(PERIODS, true).setAllowInvalid(false).build());
+  sh.getRange('E6').setNumberFormat('@').setValue(Utilities.formatDate(keyToDate_(d.from), TZ, 'EEE d MMM') + ' – ' + Utilities.formatDate(keyToDate_(d.to), TZ, 'EEE d MMM yyyy'))
+    .setFontColor(BRAND.muted);
+  sh.getRange('G6').setValue('From').setFontSize(9).setFontColor(BRAND.muted).setHorizontalAlignment('right');
+  sh.getRange('I6').setValue('To').setFontSize(9).setFontColor(BRAND.muted).setHorizontalAlignment('right');
+  const dateRule = SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(false).build();
+  sh.getRange('H6').setValue(customFrom instanceof Date ? customFrom : '').setDataValidation(dateRule).setNumberFormat('d mmm yyyy').setBackground(BRAND.grey);
+  sh.getRange('J6').setValue(customTo instanceof Date ? customTo : '').setDataValidation(dateRule).setNumberFormat('d mmm yyyy').setBackground(BRAND.grey);
+  sh.getRange('K6').setValue('← for "Custom dates"').setFontSize(9).setFontColor(BRAND.muted);
+  sh.setRowHeight(6, 30);
+
+  // Headline tiles
+  const tiles = [
+    ['TOTAL HOURS', Math.round(d.totalHours * 100) / 100, '0.00', BRAND.ink],
+    ['SHIFTS', d.totalShifts, '0', BRAND.ink],
+    ['STAFF WORKED', d.worked, '0', BRAND.ink],
+    ['ON SHIFT NOW', d.onShift, '0', d.onShift ? BRAND.green : BRAND.muted],
+  ];
+  tiles.forEach(function (t, i) {
+    const c = 2 + i * 2;
+    sh.getRange(8, c, 1, 2).merge().setValue(t[0]).setFontSize(9).setFontWeight('bold').setFontColor(BRAND.muted).setBackground(BRAND.grey);
+    sh.getRange(9, c, 1, 2).merge().setValue(t[1]).setNumberFormat(t[2]).setFontSize(24).setFontWeight('bold').setFontColor(t[3])
+      .setBackground(BRAND.grey).setHorizontalAlignment('left');
+    sh.getRange(8, c, 2, 2).setBorder(true, true, true, true, false, false, '#FFFFFF', SpreadsheetApp.BorderStyle.SOLID_THICK);
+  });
+  sh.setRowHeight(8, 22); sh.setRowHeight(9, 44);
+
+  // Hours by employee
+  let row = 11;
+  const section = function (r, title, note) {
+    sh.getRange(r, 2).setValue(title).setFontSize(12).setFontWeight('bold');
+    if (note) sh.getRange(r, 4).setValue(note).setFontSize(9).setFontColor(BRAND.muted);
+    sh.setRowHeight(r, 28);
+  };
+  section(row, 'Hours by employee', 'Shifts count on the day they started. Hours are clock-in to clock-out.');
+  row++;
+  const head = ['Employee', 'ID', 'Role', 'Shifts', 'Days', 'Total hours', 'Total (h:mm)', 'Avg shift', 'First clock-in', 'Last clock-out', 'Status'];
+  sh.getRange(row, 2, 1, head.length).setValues([head]).setBackground(BRAND.ink).setFontColor('#FFFFFF').setFontWeight('bold').setFontSize(10);
+  sh.getRange(row, 5, 1, 5).setHorizontalAlignment('right');
+  sh.setRowHeight(row, 28);
+  const tableTop = row + 1;
+  if (d.list.length) {
+    const values = d.list.map(function (r) {
+      return [r.name, r.id, r.role, r.shifts, Object.keys(r.days).length, Math.round(r.hours * 100) / 100, hm_(r.hours),
+        r.shifts ? Math.round(r.hours / r.shifts * 100) / 100 : '', r.firstIn ? when_(r.firstIn) : '', r.lastOut ? when_(r.lastOut) : '',
+        r.onShift ? 'On shift' : (r.status === 'Switched off' ? 'Switched off' : 'Off')];
+    });
+    const body = sh.getRange(tableTop, 2, values.length, head.length);
+    // Keep "42:30" and "Mon 9 Nov, 7:00 am" as text so Sheets doesn't turn them into dates.
+    sh.getRange(tableTop, 8, values.length + 1, 1).setNumberFormat('@');
+    sh.getRange(tableTop, 10, values.length, 2).setNumberFormat('@');
+    body.setValues(values).setFontSize(10);
+    sh.getRange(tableTop, 2, values.length, 1).setFontWeight('bold');
+    sh.getRange(tableTop, 5, values.length, 5).setHorizontalAlignment('right');
+    sh.getRange(tableTop, 7, values.length, 1).setNumberFormat('0.00').setFontWeight('bold');
+    sh.getRange(tableTop, 9, values.length, 1).setNumberFormat('0.00');
+    for (let i = 0; i < values.length; i++) {
+      sh.getRange(tableTop + i, 2, 1, head.length).setBackground(i % 2 ? BRAND.grey : '#FFFFFF');
+      const st = sh.getRange(tableTop + i, 12);
+      if (values[i][10] === 'On shift') st.setFontColor(BRAND.green).setFontWeight('bold');
+      else st.setFontColor(BRAND.muted);
+      sh.setRowHeight(tableTop + i, 26);
+    }
+    row = tableTop + values.length;
+    sh.getRange(row, 2, 1, head.length).setValues([['Total', '', '', d.totalShifts, '', Math.round(d.totalHours * 100) / 100, hm_(d.totalHours), '', '', '', '']])
+      .setFontWeight('bold').setBackground(BRAND.amberBg)
+      .setBorder(true, false, false, false, false, false, BRAND.ink, SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    sh.getRange(row, 5, 1, 5).setHorizontalAlignment('right');
+    sh.getRange(row, 7).setNumberFormat('0.00');
+    sh.setRowHeight(row, 28);
+  } else {
+    sh.getRange(tableTop, 2).setValue('No employees yet. Add them in the Crew Clock Manager screen.').setFontColor(BRAND.muted);
+    row = tableTop;
+  }
+
+  // Daily hours grid
+  row += 3;
+  if (d.days.length <= 31 && d.list.length) {
+    section(row, 'Daily hours', 'Hours per day, by the day each shift started.');
+    row++;
+    const dh = ['Employee'].concat(d.days.map(function (k) { return Utilities.formatDate(keyToDate_(k), TZ, 'EEE d'); })).concat(['Total']);
+    sh.getRange(row, 2, 1, dh.length).setValues([dh]).setBackground(BRAND.ink).setFontColor('#FFFFFF').setFontWeight('bold').setFontSize(10);
+    sh.getRange(row, 3, 1, dh.length - 1).setHorizontalAlignment('center');
+    const gv = d.list.map(function (r) {
+      return [r.name].concat(d.days.map(function (k) { return r.daily[k] ? Math.round(r.daily[k] * 100) / 100 : ''; }))
+        .concat([Math.round(r.hours * 100) / 100]);
+    });
+    const totals = ['Total'].concat(d.days.map(function (k) {
+      return Math.round(d.list.reduce(function (t, r) { return t + (r.daily[k] || 0); }, 0) * 100) / 100 || '';
+    })).concat([Math.round(d.totalHours * 100) / 100]);
+    gv.push(totals);
+    const grid = sh.getRange(row + 1, 2, gv.length, dh.length);
+    grid.setValues(gv).setFontSize(10);
+    sh.getRange(row + 1, 3, gv.length, dh.length - 1).setNumberFormat('0.00').setHorizontalAlignment('center');
+    // Shade busier days more strongly
+    const rule = SpreadsheetApp.newConditionalFormatRule()
+      .setGradientMinpointWithValue('#FFFFFF', SpreadsheetApp.InterpolationType.NUMBER, '0')
+      .setGradientMaxpointWithValue('#F4B8B2', SpreadsheetApp.InterpolationType.NUMBER, '12')
+      .setRanges([sh.getRange(row + 1, 3, gv.length - 1, d.days.length)]).build();
+    sh.setConditionalFormatRules([rule]);
+    sh.getRange(row + gv.length, 2, 1, dh.length).setFontWeight('bold').setBackground(BRAND.amberBg)
+      .setBorder(true, false, false, false, false, false, BRAND.ink, SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    sh.getRange(row + 1, 2 + dh.length - 1, gv.length, 1).setFontWeight('bold');
+    row += gv.length + 3;
+  }
+
+  // Needs attention
+  section(row, 'Needs attention', d.attention.length ? 'Check these with the employee and fix the times in the Punches tab if needed.' : '');
+  row++;
+  if (d.attention.length) {
+    sh.getRange(row, 2, 1, 3).setValues([['Employee', 'Started', 'What to check']]).setBackground(BRAND.ink).setFontColor('#FFFFFF').setFontWeight('bold').setFontSize(10);
+    const av = d.attention.map(function (a) { return [a.name, a.when, a.issue]; });
+    sh.getRange(row + 1, 3, av.length, 1).setNumberFormat('@');
+    sh.getRange(row + 1, 2, av.length, 3).setValues(av).setFontSize(10).setBackground(BRAND.errBg);
+    row += av.length + 1;
+  } else {
+    sh.getRange(row, 2).setValue('Nothing to check. Every shift in this period looks normal.').setFontColor(BRAND.green);
+    row++;
+  }
+
+  // Chart of hours per employee, below everything else
+  row += 2;
+  const withHours = d.list.filter(function (r) { return r.hours > 0; }).length;
+  if (withHours) {
+    const chart = sh.newChart()
+      .setChartType(Charts.ChartType.BAR)
+      .addRange(sh.getRange(tableTop, 2, withHours, 1))
+      .addRange(sh.getRange(tableTop, 7, withHours, 1))
+      .setPosition(row, 2, 0, 0)
+      .setOption('title', 'Total hours by employee')
+      .setOption('titleTextStyle', { color: BRAND.ink, fontSize: 12, bold: true })
+      .setOption('colors', [BRAND.red])
+      .setOption('legend', { position: 'none' })
+      .setOption('hAxis', { minValue: 0, gridlines: { color: '#EEEEEE' } })
+      .setOption('width', 620)
+      .setOption('height', Math.max(180, 40 + withHours * 32))
+      .build();
+    sh.insertChart(chart);
+  }
+  ss.setActiveSheet(sh);
+}
+
+/** Gives Punches, Workers and Weekly hours a consistent, readable style. */
+function formatTabs() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureSheets_(ss);
+  const head = function (sh, n) {
+    sh.getRange(1, 1, 1, n).setBackground(BRAND.ink).setFontColor('#FFFFFF').setFontWeight('bold');
+    sh.setFrozenRows(1);
+    sh.setRowHeight(1, 28);
+    if (!sh.getBandings().length && sh.getLastRow() > 1) {
+      sh.getRange(1, 1, Math.max(2, sh.getLastRow()), n).applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, true, false);
+    }
+  };
+  const p = ss.getSheetByName('Punches');
+  head(p, PUNCH_HEADERS.length);
+  if (p.getLastRow() > 1) {
+    // Old rows stored the date as text: turn them into real dates.
+    const n = p.getLastRow() - 1;
+    const rng = p.getRange(2, 1, n, 3);
+    const v = rng.getValues();
+    let changed = false;
+    v.forEach(function (r) {
+      [0, 2].forEach(function (i) {
+        if (typeof r[i] === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r[i])) { r[i] = keyToDate_(r[i]); changed = true; }
+      });
+    });
+    if (changed) rng.setValues(v);
+  }
+  p.getRange('A:A').setNumberFormat('ddd d mmm yyyy');
+  p.getRange('C:C').setNumberFormat('d mmm yyyy');
+  p.getRange('G:G').setNumberFormat('0.00');
+  [130, 90, 110, 90, 170, 70, 95, 100, 200].forEach(function (w, i) { p.setColumnWidth(i + 1, w); });
+  p.getRange(1, 1, 1, PUNCH_HEADERS.length).setValues([PUNCH_HEADERS]);
+
+  const w = ss.getSheetByName('Workers');
+  head(w, WORKER_HEADERS.length);
+  w.getRange('H:H').setNumberFormat('d mmm yyyy, h:mm am/pm');
+  w.getRange('G:G').setNumberFormat('d mmm yyyy, h:mm am/pm');
+  [90, 170, 120, 100, 110, 100, 160, 160].forEach(function (x, i) { w.setColumnWidth(i + 1, x); });
+  w.hideColumns(W_PHONE_ID);
+  w.hideColumns(W_LAST_AT);
+
+  const wk = ss.getSheetByName('Weekly hours');
+  if (wk) {
+    wk.getRange(1, 1, 1, 5).setBackground(BRAND.ink).setFontColor('#FFFFFF').setFontWeight('bold');
+    wk.getRange('A:A').setNumberFormat('d mmm yyyy');
+    wk.getRange('E:E').setNumberFormat('0.00');
+    [120, 100, 170, 70, 90].forEach(function (x, i) { wk.setColumnWidth(i + 1, x); });
+  }
+  // Tab order and colours: Summary first.
+  const order = ['Summary', 'Weekly hours', 'Punches', 'Workers'];
+  order.forEach(function (name, i) {
+    const s = ss.getSheetByName(name);
+    if (s) { ss.setActiveSheet(s); ss.moveActiveSheet(i + 1); }
+  });
+  const sumSheet = ss.getSheetByName('Summary');
+  if (sumSheet) sumSheet.setTabColor(BRAND.red);
 }
