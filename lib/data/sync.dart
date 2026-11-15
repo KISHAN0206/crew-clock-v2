@@ -102,6 +102,31 @@ class SyncService extends ChangeNotifier with WidgetsBindingObserver {
     return (url: url, token: token, expires: expires);
   }
 
+  /// Seconds each station QR code lasts before the tablet shows a new one (must match the sheet script).
+  static const codeSeconds = 30;
+
+  /// The single QR code everyone scans. Changes every [codeSeconds]; signed so it can't be made up.
+  ({String url, DateTime nextChange})? stationQr() {
+    final link = store.sheetUrl;
+    if (link == null) return null;
+    final base = Uri.parse(link);
+    final key = base.queryParameters['key'];
+    if (key == null || key.isEmpty) return null;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final w = now ~/ (codeSeconds * 1000);
+    final sig = Hmac(sha256, utf8.encode(key)).convert(utf8.encode('w|$w')).toString().substring(0, 12);
+    final url = Uri(scheme: base.scheme, host: base.host, path: base.path, queryParameters: {'a': 's', 'c': '$w.$sig'}).toString();
+    return (url: url, nextChange: DateTime.fromMillisecondsSinceEpoch((w + 1) * codeSeconds * 1000));
+  }
+
+  /// Latest punches recorded by the sheet (newest first), for the "just clocked in" list.
+  Future<List<Map<String, Object?>>> recentPunches() async {
+    final r = await send({'type': 'recent'});
+    final items = r['items'];
+    if (items is! List) return const [];
+    return [for (final i in items) if (i is Map) Map<String, Object?>.from(i)];
+  }
+
   /// Removes the phone link for a worker in the sheet, so their next scan links a new phone.
   Future<void> unlinkPhone(Worker w) async {
     await send({'type': 'unlink', 'id': w.id});

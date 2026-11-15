@@ -3,11 +3,13 @@
 Staff clock in / clock out for a shared tablet.
 
 - **Manager** (PIN-protected): add workers. Each gets an ID like `JB-4821`.
-- **Clock in / out by QR**: the worker taps their name on the tablet, a one-time QR code appears, and they scan it
-  with their own phone. The Google Sheet script records the punch and decides IN or OUT.
-- **Phone linking**: a worker's first scan links their phone. After that only that phone works for them, and a phone
-  can't clock in for anyone else. Reset a link from Manager → Workers → Reset phone link (or clear it in the sheet).
-- QR codes expire after 90 seconds and work once.
+- **Clock in / out by QR**: the tablet shows one QR code for everyone, changing every 30 seconds. Workers scan it
+  with their own phone and tap the link; the Google Sheet script records the punch and decides IN or OUT.
+- **Phone linking**: a phone's first scan asks "Who are you?" and links that phone to the chosen worker (only
+  workers without a linked phone are listed). After that the phone clocks them in or out straight away.
+  Reset a link from Manager → Workers → Reset phone link (or clear it in the sheet).
+- A second scan within 2 minutes doesn't flip IN/OUT, so double scans are harmless.
+- The tablet shows who just clocked in or out, and how many people are on shift.
 - **Timesheet** on the tablet (hours per worker, punch log, CSV export) and in the Google Sheet (Weekly hours tab).
 - Needs internet on the tablet and on workers' phones.
 
