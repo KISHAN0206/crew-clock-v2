@@ -102,6 +102,9 @@ class SyncService extends ChangeNotifier with WidgetsBindingObserver {
     return (url: url, token: token, expires: expires);
   }
 
+  /// The web page workers' phones open after scanning (docs/index.html in this repo, on GitHub Pages).
+  static const scanPage = 'https://kishan0206.github.io/crew-clock-v2/';
+
   /// Seconds each station QR code lasts before the tablet shows a new one (must match the sheet script).
   static const codeSeconds = 30;
 
@@ -115,7 +118,12 @@ class SyncService extends ChangeNotifier with WidgetsBindingObserver {
     final now = DateTime.now().millisecondsSinceEpoch;
     final w = now ~/ (codeSeconds * 1000);
     final sig = Hmac(sha256, utf8.encode(key)).convert(utf8.encode('w|$w')).toString().substring(0, 12);
-    final url = Uri(scheme: base.scheme, host: base.host, path: base.path, queryParameters: {'a': 's', 'q': '$w.$sig'}).toString();
+    // The phone opens the scan page (a normal website), which sends the scan to the sheet script.
+    // This avoids Google's account switching on phones signed into several Google accounts.
+    final segs = base.pathSegments;
+    final i = segs.indexOf('s');
+    final deployment = (i >= 0 && i + 1 < segs.length) ? segs[i + 1] : '';
+    final url = Uri.parse(scanPage).replace(queryParameters: {'s': deployment, 'q': '$w.$sig'}).toString();
     return (url: url, nextChange: DateTime.fromMillisecondsSinceEpoch((w + 1) * codeSeconds * 1000));
   }
 

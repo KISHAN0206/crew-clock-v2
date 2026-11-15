@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Crew Clock</title>
+<style>
+/* Phone page opened by scanning the Crew Clock station QR code. */
+:root {
+  --red: #DA291C; --yellow: #F6BE00; --ink: #231F20; --bg: #F2F0EF; --line: #DDD8D5;
+  --muted: #6B6461; --green: #3E8468; --amber: #9A5A00; --err: #9F1D14;
+  --font: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font); }
+header { background: var(--red); color: #fff; padding: 18px 20px; border-bottom: 4px solid var(--yellow); }
+header b { font-size: 20px; letter-spacing: 1px; }
+header span { display: block; font-size: 11px; letter-spacing: 1.5px; color: var(--yellow); font-weight: 600; }
+main { padding: 24px 16px; max-width: 480px; margin: 0 auto; }
+.card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 24px 18px; text-align: center; }
+.card.left { text-align: left; }
+.big { font-size: 42px; font-weight: 800; margin: 6px 0; }
+.mark { font-size: 56px; line-height: 1; }
+.in { color: var(--green); } .out { color: var(--amber); } .err { color: var(--err); }
+.muted { color: var(--muted); font-size: 15px; }
+.spin { width: 36px; height: 36px; border: 4px solid var(--line); border-top-color: var(--red); border-radius: 50%; margin: 10px auto; animation: s 1s linear infinite; }
+@keyframes s { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s; } }
+h2 { margin: 0 0 4px; font-size: 22px; }
+.list { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+button { font: inherit; font-size: 17px; padding: 14px 16px; border-radius: 10px; border: 1px solid var(--line); background: #fff; color: var(--ink); text-align: left; cursor: pointer; }
+button.primary { background: var(--red); color: #fff; border-color: var(--red); text-align: center; font-weight: 700; }
+button.plain { text-align: center; }
+button:focus-visible, input:focus-visible { outline: 3px solid var(--yellow); outline-offset: 2px; }
+input { font: inherit; font-size: 17px; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); width: 100%; margin-top: 12px; }
+</style>
+</head>
+<body>
+<header><b>CREW CLOCK</b><span>JAYBEL OFFICE CHOICE</span></header>
+<main><div class="card" id="c"><div class="spin"></div><p class="muted">Recording your scan…</p></div></main>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const deployment = params.get('s') || '';
+  const code = params.get('q') || '';
+  const card = document.getElementById('c');
+  let workers = [];
+
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function device() {
+    try {
+      let d = localStorage.getItem('ccDevice');
+      if (!d) {
+        const a = new Uint8Array(16);
+        crypto.getRandomValues(a);
+        d = 'D' + Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
+        localStorage.setItem('ccDevice', d);
+      }
+      return d;
+    } catch (e) { return ''; }
+  }
+
+  async function api(body) {
+    const url = 'https://script.google.com/macros/s/' + encodeURIComponent(deployment) + '/exec';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(url, { method: 'POST', body: JSON.stringify(body) });
+        return await res.json();
+      } catch (e) {
+        if (attempt === 1) throw e;
+        await new Promise((r) => setTimeout(r, 800));
+      }
+    }
+  }
+
+  function wait(text) { card.className = 'card'; card.innerHTML = '<div class="spin"></div><p class="muted">' + esc(text) + '</p>'; }
+
+  function show(r) {
+    if (r && r.needsLink) { workers = r.workers || []; pick(''); return; }
+    card.className = 'card';
+    if (r && r.ok) {
+      const isIn = r.punch === 'IN';
+      card.innerHTML =
+        '<div class="mark ' + (isIn ? 'in' : 'out') + '">&#10003;</div>' +
+        '<div class="big ' + (isIn ? 'in' : 'out') + '">' + (isIn ? 'Clocked in' : 'Clocked out') + '</div>' +
+        '<p style="font-size:20px;margin:8px 0"><b>' + esc(r.name) + '</b> · ' + esc(r.time) + '</p>' +
+        (r.hours !== '' && r.hours != null ? '<p class="muted">Shift length: ' + esc(r.hours) + ' h</p>' : '') +
+        (r.note ? '<p class="muted">' + esc(r.note) + '</p>' : '') +
+        (r.firstLink ? '<p class="muted">This phone is now linked to you. Next time, just scan the code.</p>' : '') +
+        '<p class="muted">You can close this page.</p>';
+    } else {
+      card.innerHTML = '<div class="mark err">!</div><p style="font-size:18px" class="err"><b>Not recorded</b></p><p>' +
+        esc((r && r.error) || 'Something went wrong. Scan again.') + '</p>';
+    }
+  }
+
+  function offline() { show({ ok: false, error: 'Couldn\'t reach the timesheet. Check your phone\'s internet and scan again.' }); }
+
+  function pick(q) {
+    const ql = q.toLowerCase();
+    const rows = workers.filter((w) => !ql || w.name.toLowerCase().includes(ql));
+    card.className = 'card left';
+    card.innerHTML = '<h2>Who are you?</h2><p class="muted">First time on this phone. Pick your name once and this phone is linked to you.</p>' +
+      (workers.length > 8 ? '<input id="q" placeholder="Find your name" autocomplete="off" value="' + esc(q) + '">' : '') +
+      '<div class="list">' + (rows.length
+        ? rows.map((w) => '<button data-id="' + esc(w.id) + '">' + esc(w.name) + '</button>').join('')
+        : '<p class="muted">' + (workers.length ? 'No one matches.' : 'Everyone already has a linked phone.') +
+          ' Don\'t see your name? Ask your manager to add you or reset your phone link.</p>') + '</div>';
+    const qi = document.getElementById('q');
+    if (qi) qi.oninput = () => { pick(qi.value); const n = document.getElementById('q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); };
+    card.querySelectorAll('button[data-id]').forEach((b) => { b.onclick = () => confirmPick(b.getAttribute('data-id'), b.textContent); });
+  }
+
+  function confirmPick(id, name) {
+    card.className = 'card';
+    card.innerHTML = '<h2>Are you ' + esc(name) + '?</h2><p class="muted">This links this phone to ' + esc(name) +
+      '. Only ' + esc(name) + ' can use it to clock in and out.</p>' +
+      '<div class="list"><button class="primary" id="yes">Yes, that\'s me</button><button class="plain" id="no">Back</button></div>';
+    document.getElementById('no').onclick = () => pick('');
+    document.getElementById('yes').onclick = async () => {
+      wait('Linking your phone…');
+      try { show(await api({ type: 'station_link', q: code, device: device(), id })); } catch (e) { offline(); }
+    };
+  }
+
+  (async () => {
+    if (!/^[A-Za-z0-9_-]{20,120}$/.test(deployment) || !code) {
+      show({ ok: false, error: 'Scan the QR code on the Crew Clock station to clock in or out.' });
+      return;
+    }
+    const d = device();
+    if (!d) {
+      show({ ok: false, error: 'Your phone\'s browser is blocking storage, so it can\'t be linked. Turn off private browsing and scan again.' });
+      return;
+    }
+    try { show(await api({ type: 'station_scan', q: code, device: d })); } catch (e) { offline(); }
+  })();
+})();
+</script>
+</body>
+</html>
