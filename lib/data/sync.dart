@@ -115,7 +115,7 @@ class SyncService extends ChangeNotifier with WidgetsBindingObserver {
     final now = DateTime.now().millisecondsSinceEpoch;
     final w = now ~/ (codeSeconds * 1000);
     final sig = Hmac(sha256, utf8.encode(key)).convert(utf8.encode('w|$w')).toString().substring(0, 12);
-    final url = Uri(scheme: base.scheme, host: base.host, path: base.path, queryParameters: {'a': 's', 'c': '$w.$sig'}).toString();
+    final url = Uri(scheme: base.scheme, host: base.host, path: base.path, queryParameters: {'a': 's', 'q': '$w.$sig'}).toString();
     return (url: url, nextChange: DateTime.fromMillisecondsSinceEpoch((w + 1) * codeSeconds * 1000));
   }
 
