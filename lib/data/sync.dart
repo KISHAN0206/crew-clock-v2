@@ -102,8 +102,8 @@ class SyncService extends ChangeNotifier with WidgetsBindingObserver {
     return (url: url, token: token, expires: expires);
   }
 
-  /// The web page workers' phones open after scanning (docs/index.html in this repo, on GitHub Pages).
-  static const scanPage = 'https://kishan0206.github.io/crew-clock-v2/';
+  /// The web page workers' phones open after scanning (index.html in the public crew-clock-scan repo, on GitHub Pages).
+  static const scanPage = 'https://kishan0206.github.io/crew-clock-scan/';
 
   /// Seconds each station QR code lasts before the tablet shows a new one (must match the sheet script).
   static const codeSeconds = 30;

@@ -2,7 +2,7 @@
 
 ## Quick links (copy from here)
 
-**Install the app on a tablet** (open in the tablet's Chrome):
+**Install the app on a tablet** (open in the tablet's Chrome, signed in to GitHub, because this repository is private):
 
 ```
 https://github.com/KISHAN0206/crew-clock-v2/releases/latest/download/crew-clock-32bit.apk
@@ -23,7 +23,7 @@ https://github.com/KISHAN0206/crew-clock-v2/releases/latest/download/crew-clock-
 **Web version of the clock-in station** (no install, add to home screen from Chrome):
 
 ```
-https://kishan0206.github.io/crew-clock-v2/station.html
+https://kishan0206.github.io/crew-clock-scan/station.html
 ```
 
 **Google Sheet link for the app** (Manager → Cloud sync). Add your sync key to the end:
