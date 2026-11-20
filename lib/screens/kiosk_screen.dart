@@ -1,18 +1,27 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'dart:ui' show FontFeature;
 
 import 'package:flutter/material.dart';
-import 'package:qr_flutter/qr_flutter.dart';
+import 'package:flutter/services.dart';
 
+import '../data/models.dart';
 import '../data/store.dart';
-import '../data/sync.dart';
 import '../ui.dart';
 import '../util/format.dart';
+import '../util/security.dart';
+import 'camera_screen.dart';
 
-/// The clock-in screen: one QR code for everyone. Workers scan it with their own phone,
-/// and the list on the right shows who just clocked in or out.
+enum _Step { login, punch, done, enrollPin, enrollPhoto }
+
+/// The screen workers use: sign in with ID + PIN, take a photo, clock in or out.
+/// Also runs first-day setup when the manager hands over the tablet.
 class KioskScreen extends StatefulWidget {
-  const KioskScreen({super.key});
+  const KioskScreen({super.key, this.enrollWorker, this.onEnrollStarted});
+
+  /// When set, the kiosk opens straight into first-day setup for this worker.
+  final Worker? enrollWorker;
+  final VoidCallback? onEnrollStarted;
 
   @override
   State<KioskScreen> createState() => _KioskScreenState();
@@ -20,294 +29,389 @@ class KioskScreen extends StatefulWidget {
 
 class _KioskScreenState extends State<KioskScreen> {
   final store = Store.instance;
-  final sync = SyncService.instance;
+  _Step step = _Step.login;
 
-  String? qrUrl;
-  DateTime? nextChange;
-  Timer? tick;
-  Timer? poll;
-  bool polling = false;
+  final idCtrl = TextEditingController();
+  final pinCtrl = TextEditingController();
+  final pin1Ctrl = TextEditingController();
+  final pin2Ctrl = TextEditingController();
 
-  List<Map<String, Object?>> feed = const [];
-  final Set<String> seen = {};
-  bool firstLoad = true;
-  String? offline;
+  Worker? worker;
+  String nextType = 'in';
+  Uint8List? photo;
+  String? error;
+  bool busy = false;
+  String? enrollPin;
 
-  // Big confirmation shown on the tablet for a few seconds after each scan.
-  Map<String, Object?>? flash;
-  Timer? flashTimer;
+  // done screen
+  Uint8List? donePhoto;
+  String doneChip = '';
+  bool doneIsIn = true;
+  String doneBig = '';
+  String doneMsg = '';
+  Timer? doneTimer;
 
   @override
   void initState() {
     super.initState();
-    _refreshQr();
-    tick = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      if (nextChange == null || !DateTime.now().isBefore(nextChange!)) {
-        _refreshQr();
-      } else {
-        setState(() {}); // countdown
-      }
-    });
-    _poll();
-  }
-
-  @override
-  void dispose() {
-    tick?.cancel();
-    poll?.cancel();
-    flashTimer?.cancel();
-    super.dispose();
-  }
-
-  void _refreshQr() {
-    final qr = sync.stationQr();
-    setState(() {
-      qrUrl = qr?.url;
-      nextChange = qr?.nextChange;
-    });
-  }
-
-  /// Checks often during the working day and rarely overnight.
-  Duration get _pollEvery {
-    final h = DateTime.now().hour;
-    return h >= 5 ? const Duration(seconds: 3) : const Duration(seconds: 30);
-  }
-
-  Future<void> _poll() async {
-    poll?.cancel();
-    if (sync.isOn && !polling) {
-      polling = true;
-      try {
-        final items = await sync.recentPunches();
-        if (!mounted) return;
-        await _absorb(items);
-        setState(() {
-          feed = items;
-          offline = null;
-        });
-      } catch (e) {
-        if (mounted) setState(() => offline = SyncService.describe(e));
-      } finally {
-        polling = false;
-      }
-    }
-    if (mounted) poll = Timer(_pollEvery, _poll);
-  }
-
-  /// Saves new punches to the tablet's own timesheet and flashes the newest one.
-  Future<void> _absorb(List<Map<String, Object?>> items) async {
-    Map<String, Object?>? newest;
-    for (final i in items.reversed) {
-      final id = '${i['id'] ?? ''}';
-      final at = (i['at'] as num?)?.toInt() ?? 0;
-      final key = '$id-$at';
-      if (id.isEmpty || at == 0 || !seen.add(key)) continue;
-      final w = store.workers[id];
-      if (w != null) await store.recordScannedPunch(w, i['punch'] == 'OUT' ? 'out' : 'in', at);
-      final fresh = DateTime.now().millisecondsSinceEpoch - at < 60 * 1000;
-      if (!firstLoad && fresh) newest = i;
-    }
-    firstLoad = false;
-    if (newest != null) {
-      flashTimer?.cancel();
-      setState(() => flash = newest);
-      flashTimer = Timer(const Duration(seconds: 5), () {
-        if (mounted) setState(() => flash = null);
+    final w = widget.enrollWorker;
+    if (w != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        widget.onEnrollStarted?.call();
+        _startEnroll(w);
       });
     }
   }
 
   @override
+  void dispose() {
+    doneTimer?.cancel();
+    for (final c in [idCtrl, pinCtrl, pin1Ctrl, pin2Ctrl]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  void _reset() {
+    doneTimer?.cancel();
+    setState(() {
+      step = _Step.login;
+      worker = null;
+      photo = null;
+      error = null;
+      busy = false;
+      enrollPin = null;
+      idCtrl.clear();
+      pinCtrl.clear();
+      pin1Ctrl.clear();
+      pin2Ctrl.clear();
+    });
+  }
+
+  // ---------- sign in ----------
+
+  void _signIn() {
+    final id = normaliseWorkerId(idCtrl.text);
+    final pin = pinCtrl.text.trim();
+    final w = store.workers[id];
+    if (w != null && !w.isSetUp) {
+      pinCtrl.clear();
+      setState(() => error = 'This ID isn\'t set up yet. Ask your manager to start your first-day setup.');
+      return;
+    }
+    if (w == null || !store.checkWorkerPin(w, pin)) {
+      pinCtrl.clear();
+      setState(() => error = 'ID or PIN is wrong. Try again, or ask your manager to reset your PIN.');
+      return;
+    }
+    if (!w.active) {
+      setState(() => error = 'This account is switched off. Ask your manager to turn it back on.');
+      return;
+    }
+    final last = store.lastPunch(w.id);
+    FocusScope.of(context).unfocus();
+    setState(() {
+      worker = w;
+      nextType = (last != null && last.isIn) ? 'out' : 'in';
+      photo = null;
+      error = null;
+      step = _Step.punch;
+    });
+  }
+
+  Future<void> _takePunchPhoto() async {
+    final bytes = await takePhoto(context, 'Clock-${nextType == 'in' ? 'in' : 'out'} photo: look at the camera');
+    if (bytes != null && mounted) setState(() => photo = bytes);
+  }
+
+  Future<void> _punch() async {
+    final w = worker, img = photo;
+    if (w == null || img == null || busy) return;
+    setState(() => busy = true);
+    try {
+      final previous = store.lastPunch(w.id);
+      final p = await store.addPunch(w, nextType, img);
+      var msg = p.isIn ? 'Have a good shift, ${w.firstName}.' : 'See you next time, ${w.firstName}.';
+      if (!p.isIn && previous != null && previous.isIn) {
+        msg += ' Shift length: ${fmtHours((p.at - previous.at) / 3600000.0)} h.';
+      }
+      _showDone(img, p.isIn ? 'Clocked in' : 'Clocked out', p.isIn, fmtTime(p.time), msg, const Duration(seconds: 8));
+    } catch (_) {
+      setState(() {
+        busy = false;
+        error = 'Punch not saved. Try again.';
+      });
+    }
+  }
+
+  void _showDone(Uint8List img, String chip, bool isIn, String big, String msg, Duration back) {
+    setState(() {
+      donePhoto = img;
+      doneChip = chip;
+      doneIsIn = isIn;
+      doneBig = big;
+      doneMsg = msg;
+      busy = false;
+      step = _Step.done;
+    });
+    doneTimer?.cancel();
+    doneTimer = Timer(back, () {
+      if (mounted) _reset();
+    });
+  }
+
+  // ---------- first-day setup ----------
+
+  void _startEnroll(Worker w) {
+    doneTimer?.cancel();
+    setState(() {
+      worker = w;
+      step = _Step.enrollPin;
+      error = null;
+      photo = null;
+      enrollPin = null;
+      pin1Ctrl.clear();
+      pin2Ctrl.clear();
+    });
+  }
+
+  void _enrollPinNext() {
+    final a = pin1Ctrl.text.trim(), b = pin2Ctrl.text.trim();
+    if (!RegExp(r'^\d{4}$').hasMatch(a)) {
+      setState(() => error = 'Your PIN must be exactly 4 digits.');
+      return;
+    }
+    if (isWeakPin(a)) {
+      setState(() => error = 'Pick a PIN that\'s harder to guess than $a.');
+      return;
+    }
+    if (a != b) {
+      pin2Ctrl.clear();
+      setState(() => error = 'The two PINs don\'t match. Enter it again.');
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    setState(() {
+      enrollPin = a;
+      error = null;
+      step = _Step.enrollPhoto;
+    });
+  }
+
+  Future<void> _takeIdPhoto() async {
+    final bytes = await takePhoto(context, 'ID photo: face the camera, no hat or sunglasses');
+    if (bytes != null && mounted) setState(() => photo = bytes);
+  }
+
+  Future<void> _finishEnroll() async {
+    final w = worker, pin = enrollPin, img = photo;
+    if (w == null || pin == null || img == null || busy) return;
+    setState(() => busy = true);
+    try {
+      await store.completeSetup(w, pin, img);
+      _showDone(img, 'Setup complete', true, w.id,
+          'You\'re all set, ${w.firstName}. Clock in with ${w.id} and your PIN.', const Duration(seconds: 10));
+    } catch (_) {
+      setState(() {
+        busy = false;
+        error = 'Setup not saved. Try again.';
+      });
+    }
+  }
+
+  // ---------- layout ----------
+
+  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: Listenable.merge([store, sync]),
-      builder: (context, _) {
-        if (!sync.isOn || qrUrl == null) return _notConnected();
-        return LayoutBuilder(builder: (context, box) {
-          final wide = box.maxWidth >= 900;
-          final qr = _qrCard(wide);
-          final side = _sidePanel();
-          return SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-            child: wide
-                ? Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Expanded(flex: 6, child: qr),
-                    const SizedBox(width: 20),
-                    Expanded(flex: 4, child: side),
-                  ])
-                : Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [qr, const SizedBox(height: 16), side]),
-          );
-        });
-      },
+    return LayoutBuilder(builder: (context, box) {
+      final wide = box.maxWidth >= 900;
+      final panel = ConstrainedBox(constraints: const BoxConstraints(maxWidth: 480), child: _panel());
+      if (wide) {
+        return Row(children: [
+          const Expanded(child: Center(child: LiveClock(big: true))),
+          Expanded(child: Center(child: SingleChildScrollView(padding: const EdgeInsets.all(24), child: panel))),
+        ]);
+      }
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+        child: Column(children: [const LiveClock(big: false), const SizedBox(height: 20), Center(child: panel)]),
+      );
+    });
+  }
+
+  Widget _panel() => switch (step) {
+        _Step.login => _loginPanel(),
+        _Step.punch => _punchPanel(),
+        _Step.done => _donePanel(),
+        _Step.enrollPin || _Step.enrollPhoto => _enrollPanel(),
+      };
+
+  Widget _title(String t) => Text(t.toUpperCase(),
+      style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800, letterSpacing: .5, color: AppColors.ink));
+
+  InputDecoration _dec(String label, {String? hint}) => InputDecoration(labelText: label, hintText: hint, counterText: '');
+
+  Widget _pinField(TextEditingController c, String label, {TextInputAction action = TextInputAction.done, VoidCallback? onDone}) {
+    return TextField(
+      controller: c,
+      decoration: _dec(label, hint: '••••'),
+      obscureText: true,
+      keyboardType: TextInputType.number,
+      maxLength: 4,
+      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+      textAlign: TextAlign.center,
+      style: const TextStyle(fontSize: 28, letterSpacing: 16),
+      textInputAction: action,
+      onSubmitted: (_) => onDone?.call(),
     );
   }
 
-  // ---------- not connected ----------
-
-  Widget _notConnected() => Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 480),
-            child: const Panel(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.cloud_off_outlined, size: 48, color: AppColors.muted),
-                SizedBox(height: 12),
-                Text('Clock-in needs the Google Sheet', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
-                SizedBox(height: 8),
-                Text(
-                  'Workers clock in by scanning a QR code with their phone, and the scan is recorded in the Google Sheet. '
-                  'Ask your manager to open Manager → Cloud sync and connect the sheet.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: AppColors.muted),
-                ),
-              ]),
-            ),
+  Widget _loginPanel() => Panel(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          _title('Sign in to punch'),
+          const SizedBox(height: 16),
+          TextField(
+            controller: idCtrl,
+            decoration: _dec('Worker ID', hint: '${Store.idPrefix}0000'),
+            textCapitalization: TextCapitalization.characters,
+            autocorrect: false,
+            style: const TextStyle(fontSize: 20, letterSpacing: 2),
+            textInputAction: TextInputAction.next,
           ),
-        ),
+          const SizedBox(height: 12),
+          _pinField(pinCtrl, '4-digit PIN', onDone: _signIn),
+          if (error != null) ...[const SizedBox(height: 12), ErrorText(error)],
+          const SizedBox(height: 16),
+          FilledButton(onPressed: _signIn, child: const Text('Continue')),
+          const SizedBox(height: 12),
+          const Text('Use the ID your manager gave you and the PIN you created on your first day.',
+              style: TextStyle(color: AppColors.muted, fontSize: 13)),
+        ]),
       );
 
-  // ---------- QR ----------
-
-  Widget _qrCard(bool wide) {
-    final left = nextChange == null ? 0 : nextChange!.difference(DateTime.now()).inSeconds.clamp(0, SyncService.codeSeconds);
-    final f = flash;
+  Widget _punchPanel() {
+    final w = worker!;
+    final last = store.lastPunch(w.id);
+    final since = last == null
+        ? 'First punch on this account.'
+        : last.isIn
+            ? 'Clocked in at ${fmtTime(last.time)}, ${fmtDate(last.time)}.'
+            : 'Last clocked out at ${fmtTime(last.time)}, ${fmtDate(last.time)}.';
+    final isIn = nextType == 'in';
     return Panel(
-      padding: const EdgeInsets.all(24),
-      child: Column(children: [
-        const Text('SCAN TO CLOCK IN OR OUT',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800, letterSpacing: .5, color: AppColors.ink)),
-        const SizedBox(height: 4),
-        const Text('Use your phone\'s camera, then tap the link.', textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted, fontSize: 16)),
-        const SizedBox(height: 18),
-        AnimatedSwitcher(
-          duration: const Duration(milliseconds: 250),
-          child: f != null
-              ? _flashCard(f, wide ? 340 : 280)
-              : Container(
-                  key: ValueKey(qrUrl),
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                      color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppColors.line, width: 2)),
-                  child: QrImageView(
-                    data: qrUrl!,
-                    version: QrVersions.auto,
-                    size: wide ? 340 : 280,
-                    backgroundColor: Colors.white,
-                    errorCorrectionLevel: QrErrorCorrectLevel.L,
-                    semanticsLabel: 'Clock in QR code',
-                  ),
-                ),
-        ),
-        const SizedBox(height: 12),
-        Text('New code in ${left}s',
-            style: const TextStyle(color: AppColors.muted, fontSize: 13, fontFeatures: [FontFeature.tabularFigures()])),
-        const SizedBox(height: 16),
-        const Divider(color: AppColors.line, height: 1),
-        const SizedBox(height: 14),
-        const Text(
-          'First time? Your phone asks "Who are you?". Pick your name once and your phone is linked to you. '
-          'After that, scanning clocks you in, and the next scan clocks you out.',
-          textAlign: TextAlign.center,
-          style: TextStyle(color: AppColors.muted, fontSize: 14),
-        ),
-      ]),
-    );
-  }
-
-  Widget _flashCard(Map<String, Object?> f, double size) {
-    final isIn = f['punch'] != 'OUT';
-    final color = isIn ? AppColors.inGreen : AppColors.outAmber;
-    final first = '${f['name'] ?? ''}'.trim().split(RegExp(r'\s+')).first;
-    return Container(
-      key: ValueKey('flash-${f['at']}'),
-      width: size + 24,
-      height: size + 24,
-      decoration: BoxDecoration(color: isIn ? AppColors.inBg : AppColors.outBg, borderRadius: BorderRadius.circular(16)),
-      padding: const EdgeInsets.all(20),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Icon(Icons.check_circle, size: 88, color: color),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          WorkerAvatar(w, size: 52),
+          const SizedBox(width: 12),
+          Expanded(child: _title('Hi, ${w.firstName}')),
+          StatusChip(isIn ? 'Off shift' : 'On shift', isIn ? ChipKind.off : ChipKind.onShift),
+        ]),
         const SizedBox(height: 8),
-        Text(isIn ? 'Clocked in' : 'Clocked out', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800, color: color)),
-        const SizedBox(height: 6),
-        Text(first, textAlign: TextAlign.center, maxLines: 1, overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w800, color: AppColors.ink)),
-        Text('${f['time'] ?? ''}', style: const TextStyle(fontSize: 18, color: AppColors.muted)),
+        Text(since, style: const TextStyle(color: AppColors.muted)),
+        const SizedBox(height: 16),
+        PhotoBox(
+          photo: photo,
+          title: 'Tap to take a photo',
+          hint: 'Face the camera. A photo is required to punch.',
+          icon: Icons.photo_camera_outlined,
+          onTap: _takePunchPhoto,
+        ),
+        if (error != null) ...[const SizedBox(height: 12), ErrorText(error)],
+        const SizedBox(height: 16),
+        Row(children: [
+          Expanded(child: OutlinedButton(onPressed: _reset, child: const Text('Cancel'))),
+          const SizedBox(width: 10),
+          Expanded(
+            child: FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: isIn ? AppColors.inGreen : AppColors.outAmber),
+              onPressed: photo == null || busy ? null : _punch,
+              child: Text(isIn ? 'Clock in' : 'Clock out'),
+            ),
+          ),
+        ]),
       ]),
     );
   }
 
-  // ---------- clock + who just clocked in ----------
-
-  Widget _sidePanel() {
-    final today = DateTime.now();
-    final midnight = DateTime(today.year, today.month, today.day).millisecondsSinceEpoch;
-    final todays = feed.where((i) => ((i['at'] as num?)?.toInt() ?? 0) >= midnight).take(10).toList();
-    final onShift = store.workers.values.where((w) {
-      final last = store.lastPunch(w.id);
-      return w.active && last != null && last.isIn;
-    }).length;
-
-    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      Panel(
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const LiveClock(),
-          const SizedBox(height: 10),
-          StatusChip('$onShift on shift now', onShift > 0 ? ChipKind.onShift : ChipKind.off),
+  Widget _donePanel() => Panel(
+        child: Column(children: [
+          if (donePhoto != null)
+            ClipOval(child: Image.memory(donePhoto!, width: 120, height: 120, fit: BoxFit.cover)),
+          const SizedBox(height: 12),
+          StatusChip(doneChip, doneIsIn ? ChipKind.onShift : ChipKind.out),
+          const SizedBox(height: 8),
+          Text(doneBig, style: const TextStyle(fontSize: 52, fontWeight: FontWeight.w800, height: 1.1)),
+          const SizedBox(height: 8),
+          Text(doneMsg, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16)),
+          const SizedBox(height: 16),
+          SizedBox(width: double.infinity, child: OutlinedButton(onPressed: _reset, child: const Text('Done'))),
         ]),
-      ),
-      const SizedBox(height: 16),
-      Panel(
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          const Text('JUST NOW', style: sectionLabel),
-          const SizedBox(height: 6),
-          if (offline != null) ...[ErrorText('Can\'t see new scans. $offline'), const SizedBox(height: 8)],
-          if (todays.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 18),
-              child: Text('No one has clocked in yet today.', style: TextStyle(color: AppColors.muted)),
-            )
-          else
-            for (final i in todays) _feedRow(i),
-        ]),
-      ),
-    ]);
-  }
+      );
 
-  Widget _feedRow(Map<String, Object?> i) {
-    final isIn = i['punch'] != 'OUT';
-    final hours = i['hours'];
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(children: [
-        Icon(isIn ? Icons.login : Icons.logout, size: 20, color: isIn ? AppColors.inGreen : AppColors.outAmber),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Text('${i['name'] ?? ''}',
-              maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-        ),
-        if (!isIn && hours is num) ...[
-          Text('${fmtHours(hours.toDouble())} h', style: const TextStyle(color: AppColors.muted, fontSize: 13)),
-          const SizedBox(width: 10),
+  Widget _enrollPanel() {
+    final w = worker!;
+    final onPin = step == _Step.enrollPin;
+    TextStyle stepStyle(bool current) => TextStyle(
+        fontSize: 12, letterSpacing: 1, fontWeight: current ? FontWeight.w700 : FontWeight.w500,
+        color: current ? AppColors.accent : AppColors.muted);
+    return Panel(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          Text('1 · CREATE PIN', style: stepStyle(onPin)),
+          const Text('  →  ', style: TextStyle(color: AppColors.muted)),
+          Text('2 · ID PHOTO', style: stepStyle(!onPin)),
+        ]),
+        const SizedBox(height: 10),
+        _title('Welcome, ${w.firstName}'),
+        const SizedBox(height: 6),
+        Text.rich(TextSpan(children: [
+          const TextSpan(text: 'Your worker ID is '),
+          TextSpan(text: w.id, style: const TextStyle(fontWeight: FontWeight.w700, letterSpacing: 1)),
+          const TextSpan(text: '. You\'ll use it with your PIN every time you clock in or out.'),
+        ]), style: const TextStyle(color: AppColors.muted)),
+        const SizedBox(height: 16),
+        if (onPin) ...[
+          _pinField(pin1Ctrl, 'Create a 4-digit PIN', action: TextInputAction.next),
+          const SizedBox(height: 12),
+          _pinField(pin2Ctrl, 'Enter it again', onDone: _enrollPinNext),
+          if (error != null) ...[const SizedBox(height: 12), ErrorText(error)],
+          const SizedBox(height: 16),
+          FilledButton(onPressed: _enrollPinNext, child: const Text('Next: ID photo')),
+        ] else ...[
+          PhotoBox(
+            photo: photo,
+            title: 'Tap to take your ID photo',
+            hint: 'Face the camera in good light, no hat or sunglasses. Your manager uses this to check your clock-in photos.',
+            icon: Icons.account_circle_outlined,
+            onTap: _takeIdPhoto,
+          ),
+          if (error != null) ...[const SizedBox(height: 12), ErrorText(error)],
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () => setState(() {
+                  step = _Step.enrollPin;
+                  error = null;
+                }),
+                child: const Text('Back'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: FilledButton(onPressed: photo == null || busy ? null : _finishEnroll, child: const Text('Finish setup'))),
+          ]),
         ],
-        StatusChip(isIn ? 'In' : 'Out', isIn ? ChipKind.onShift : ChipKind.out),
-        const SizedBox(width: 10),
-        SizedBox(
-          width: 70,
-          child: Text('${i['time'] ?? ''}',
-              textAlign: TextAlign.right, style: const TextStyle(color: AppColors.muted, fontFeatures: [FontFeature.tabularFigures()])),
-        ),
+        const SizedBox(height: 8),
+        Align(alignment: Alignment.centerLeft, child: TextButton(onPressed: _reset, child: const Text('Cancel setup'))),
       ]),
     );
   }
 }
 
-/// Live clock and date.
+/// Big live clock shown on the kiosk.
 class LiveClock extends StatefulWidget {
-  const LiveClock({super.key});
+  const LiveClock({super.key, required this.big});
+  final bool big;
 
   @override
   State<LiveClock> createState() => _LiveClockState();
@@ -332,16 +436,17 @@ class _LiveClockState extends State<LiveClock> {
   @override
   Widget build(BuildContext context) {
     final h = now.hour % 12 == 0 ? 12 : now.hour % 12;
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+    final size = widget.big ? 140.0 : 88.0;
+    return Column(mainAxisSize: MainAxisSize.min, children: [
       Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
         Text('$h:${two(now.minute)}',
-            style: const TextStyle(
-                fontSize: 64, fontWeight: FontWeight.w800, height: 1, letterSpacing: -1, color: AppColors.ink, fontFeatures: [FontFeature.tabularFigures()])),
-        const SizedBox(width: 6),
-        Text(now.hour < 12 ? 'AM' : 'PM', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.muted)),
+            style: TextStyle(fontSize: size, fontWeight: FontWeight.w800, height: 1, letterSpacing: -2, color: AppColors.ink,
+                fontFeatures: const [FontFeature.tabularFigures()])),
+        const SizedBox(width: 8),
+        Text(now.hour < 12 ? 'AM' : 'PM', style: TextStyle(fontSize: size * .3, fontWeight: FontWeight.w700, color: AppColors.muted)),
       ]),
-      const SizedBox(height: 4),
-      Text(fmtLongDate(now), style: const TextStyle(color: AppColors.muted, fontSize: 14)),
+      const SizedBox(height: 8),
+      Text(fmtLongDate(now).toUpperCase(), style: const TextStyle(letterSpacing: 2, color: AppColors.muted, fontSize: 13)),
     ]);
   }
 }

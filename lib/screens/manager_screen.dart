@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 
 import '../data/models.dart';
 import '../data/store.dart';
-import '../data/sync.dart';
 import '../ui.dart';
 import '../util/format.dart';
 import '../util/hours.dart';
@@ -15,8 +14,10 @@ import 'sync_settings.dart';
 
 /// Manager side: PIN-protected. Add workers, start their setup, see timesheets, export and back up.
 class ManagerScreen extends StatefulWidget {
-  const ManagerScreen({super.key});
+  const ManagerScreen({super.key, required this.onStartSetup});
 
+  /// Called with a worker when the manager hands the tablet over for first-day setup.
+  final void Function(Worker) onStartSetup;
 
   @override
   State<ManagerScreen> createState() => _ManagerScreenState();
@@ -72,7 +73,7 @@ class _ManagerScreenState extends State<ManagerScreen> {
   @override
   Widget build(BuildContext context) {
     if (!unlocked) return _gate();
-    return _ManagerBody(onLock: () => setState(() => unlocked = false));
+    return _ManagerBody(onLock: () => setState(() => unlocked = false), onStartSetup: widget.onStartSetup);
   }
 
   Widget _gate() {
@@ -115,8 +116,9 @@ class _ManagerScreenState extends State<ManagerScreen> {
 }
 
 class _ManagerBody extends StatefulWidget {
-  const _ManagerBody({required this.onLock});
+  const _ManagerBody({required this.onLock, required this.onStartSetup});
   final VoidCallback onLock;
+  final void Function(Worker) onStartSetup;
 
   @override
   State<_ManagerBody> createState() => _ManagerBodyState();
@@ -204,7 +206,7 @@ class _ManagerBodyState extends State<_ManagerBody> {
           child: AnimatedBuilder(
             animation: store,
             builder: (context, _) => TabBarView(children: [
-              const _WorkersTab(),
+              _WorkersTab(onStartSetup: widget.onStartSetup),
               _TimesheetTab(onExport: _exportCsv),
             ]),
           ),
@@ -224,7 +226,8 @@ class _ManagerBodyState extends State<_ManagerBody> {
 // ---------------- Workers tab ----------------
 
 class _WorkersTab extends StatefulWidget {
-  const _WorkersTab();
+  const _WorkersTab({required this.onStartSetup});
+  final void Function(Worker) onStartSetup;
 
   @override
   State<_WorkersTab> createState() => _WorkersTabState();
@@ -254,20 +257,14 @@ class _WorkersTabState extends State<_WorkersTab> {
     setState(() => justCreated = w);
   }
 
-  Future<void> _resetPhone(Worker w) async {
+  Future<void> _reset(Worker w) async {
     final ok = await confirm(context,
-        title: 'Reset ${w.firstName}\'s phone link?',
-        body: 'Use this when ${w.firstName} gets a new phone or their scans are refused. '
-            'Their next scan links whichever phone they use.',
-        yes: 'Reset phone link');
-    if (!ok || !mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      await SyncService.instance.unlinkPhone(w);
-      messenger.showSnackBar(SnackBar(content: Text('${w.firstName}\'s phone link is reset. Their next scan links their phone.')));
-    } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Couldn\'t reset: ${SyncService.describe(e)}')));
-    }
+        title: 'Reset ${w.firstName}\'s PIN and photo?',
+        body: 'Their current PIN stops working. Setup opens on this tablet so they can create a new PIN and ID photo.',
+        yes: 'Reset and start setup');
+    if (!ok) return;
+    await store.resetSetup(w);
+    widget.onStartSetup(w);
   }
 
   @override
@@ -309,17 +306,29 @@ class _WorkersTabState extends State<_WorkersTab> {
         decoration: BoxDecoration(
             color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.accent, width: 2)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          const Text('WORKER ADDED', style: sectionLabel),
+          const Text('WORKER CREATED', style: sectionLabel),
           const SizedBox(height: 8),
           Text(w.name, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
           Text(w.id, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w600, letterSpacing: 2)),
           const SizedBox(height: 8),
-          Text(
-              '${w.firstName} can clock in now: tap their name on the Clock in / out screen and scan the QR code with their own phone. '
-              'Their first scan links that phone to them.',
-              style: const TextStyle(color: AppColors.muted, fontSize: 13)),
+          const Text(
+              'Next, hand the tablet to the worker. They create their own 4-digit PIN and take their ID photo. Starting setup locks the manager screen.',
+              style: TextStyle(color: AppColors.muted, fontSize: 13)),
           const SizedBox(height: 12),
-          OutlinedButton(onPressed: () => setState(() => justCreated = null), child: const Text('OK')),
+          Row(children: [
+            Expanded(
+              child: FilledButton(
+                onPressed: () {
+                  final target = w;
+                  setState(() => justCreated = null);
+                  widget.onStartSetup(target);
+                },
+                child: const Text('Start setup now'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: OutlinedButton(onPressed: () => setState(() => justCreated = null), child: const Text('Later'))),
+          ]),
         ]),
       );
 
@@ -335,14 +344,16 @@ class _WorkersTabState extends State<_WorkersTab> {
       final s = summarize(store.punches, w.id, week.from, week.to);
       final chip = !w.active
           ? const StatusChip('Switched off', ChipKind.off)
-          : isOn
+          : !w.isSetUp
+              ? const StatusChip('Setup needed', ChipKind.setup)
+              : isOn
                   ? StatusChip('On shift · ${fmtTime(last.time)}', ChipKind.onShift)
                   : const StatusChip('Off shift', ChipKind.off);
       rows.add(Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            WorkerAvatar(w, onTap: w.idPhoto == null ? null : () => showPhoto(context, w.idPhoto!)),
+            WorkerAvatar(w, onTap: () => showPhoto(context, w.idPhoto!)),
             const SizedBox(width: 12),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -364,7 +375,14 @@ class _WorkersTabState extends State<_WorkersTab> {
           ]),
           const SizedBox(height: 8),
           Wrap(spacing: 8, runSpacing: 8, children: [
-            _act('Reset phone link', () => _resetPhone(w)),
+            if (w.isSetUp)
+              _act('Reset PIN & photo', () => _reset(w))
+            else
+              FilledButton(
+                style: FilledButton.styleFrom(minimumSize: const Size(0, 38), textStyle: const TextStyle(fontSize: 14)),
+                onPressed: () => widget.onStartSetup(w),
+                child: const Text('Start setup on this tablet'),
+              ),
             _act(w.active ? 'Switch off' : 'Switch on', () => store.setActive(w, !w.active)),
           ]),
         ]),
@@ -387,7 +405,7 @@ class _WorkersTabState extends State<_WorkersTab> {
             child: Column(children: [
               Text('No workers yet', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
               SizedBox(height: 4),
-              Text('Add a worker. They clock in by tapping their name and scanning the QR code with their phone.',
+              Text('Add a worker, then hand them the tablet to create their PIN and ID photo.',
                   textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted)),
             ]),
           )
@@ -501,7 +519,10 @@ class _TimesheetTabState extends State<_TimesheetTab> {
                 ? const _EmptyRow('No punches in this period. Punches appear here as workers clock in.')
                 : DataTable(
                     headingTextStyle: sectionLabel,
+                    dataRowMinHeight: 60,
+                    dataRowMaxHeight: 64,
                     columns: const [
+                      DataColumn(label: Text('ID PHOTO · PUNCH PHOTO')),
                       DataColumn(label: Text('WORKER')),
                       DataColumn(label: Text('ID')),
                       DataColumn(label: Text('PUNCH')),
@@ -519,7 +540,19 @@ class _TimesheetTabState extends State<_TimesheetTab> {
   }
 
   DataRow _logRow(Punch p) {
+    final w = store.workers[p.workerId];
+    Widget thumb(String? name) => name == null
+        ? const SizedBox(width: 44, height: 44)
+        : GestureDetector(
+            onTap: () => showPhoto(context, name),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Image.file(store.photoFile(name), width: 44, height: 44, fit: BoxFit.cover,
+                  cacheWidth: 120, errorBuilder: (_, __, ___) => const SizedBox(width: 44, height: 44)),
+            ),
+          );
     return DataRow(cells: [
+      DataCell(Row(mainAxisSize: MainAxisSize.min, children: [thumb(w?.idPhoto), const SizedBox(width: 6), thumb(p.photo)])),
       DataCell(Text(p.name)),
       DataCell(Text(p.workerId, style: mono)),
       DataCell(StatusChip(p.isIn ? 'In' : 'Out', p.isIn ? ChipKind.onShift : ChipKind.out)),

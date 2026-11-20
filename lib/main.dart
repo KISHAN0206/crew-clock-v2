@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import 'data/models.dart';
 import 'data/store.dart';
 import 'data/sync.dart';
 import 'screens/kiosk_screen.dart';
@@ -105,6 +106,16 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   bool manager = false;
+  Worker? enrollWorker;
+  int kioskGeneration = 0; // forces a fresh kiosk when setup starts
+
+  void _startSetup(Worker w) {
+    setState(() {
+      manager = false; // leaving the manager screen locks it
+      enrollWorker = w;
+      kioskGeneration++;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -147,7 +158,10 @@ class _HomeShellState extends State<HomeShell> {
                     ButtonSegment(value: true, label: Text('Manager')),
                   ],
                   selected: {manager},
-                  onSelectionChanged: (s) => setState(() => manager = s.first),
+                  onSelectionChanged: (s) => setState(() {
+                    manager = s.first;
+                    enrollWorker = null;
+                  }),
                 );
                 if (box.maxWidth < 640) {
                   return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [brand, const SizedBox(height: 10), modes]);
@@ -162,7 +176,13 @@ class _HomeShellState extends State<HomeShell> {
         Expanded(
           child: SafeArea(
             top: false,
-            child: manager ? const ManagerScreen() : const KioskScreen(),
+            child: manager
+                ? ManagerScreen(onStartSetup: _startSetup)
+                : KioskScreen(
+                    key: ValueKey('kiosk-$kioskGeneration'),
+                    enrollWorker: enrollWorker,
+                    onEnrollStarted: () => enrollWorker = null,
+                  ),
           ),
         ),
       ]),

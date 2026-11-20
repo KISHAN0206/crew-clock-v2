@@ -1,5 +1,10 @@
 # Crew Clock
 
+**Current version: PIN + photo.** Workers create a 4-digit PIN and an ID photo on their first day, then clock in or out
+with their worker ID, PIN and a photo on the tablet. Everything is saved on the tablet first and uploads to the Google
+Sheet when the internet is available, so a weak connection never stops anyone clocking in.
+The QR-code version is kept on the `qr-version` branch.
+
 ## Quick links (copy from here)
 
 **Install the app on a tablet** (open in the tablet's Chrome, signed in to GitHub, because this repository is private):
@@ -20,7 +25,7 @@ Works on any device (bigger file):
 https://github.com/KISHAN0206/crew-clock-v2/releases/latest/download/crew-clock-all-devices.apk
 ```
 
-**Web version of the clock-in station** (no install, add to home screen from Chrome):
+**Web version of the QR clock-in station** (only for the QR version):
 
 ```
 https://kishan0206.github.io/crew-clock-scan/station.html
