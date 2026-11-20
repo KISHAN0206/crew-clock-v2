@@ -35,6 +35,10 @@ void main() {
   test('worker IDs are normalised and weak PINs rejected', () {
     expect(normaliseWorkerId(' jb4821 '), 'JB-4821');
     expect(normaliseWorkerId('JB-4821'), 'JB-4821');
+    expect(normaliseWorkerId(' 4821 '), '4821');
+    expect(matchWorkerId('4821', ['4821', 'JB-1000']), '4821');
+    expect(matchWorkerId('1000', ['4821', 'JB-1000']), 'JB-1000');
+    expect(matchWorkerId('9999', ['4821', 'JB-1000']), isNull);
     expect(isWeakPin('1111'), isTrue);
     expect(isWeakPin('1234'), isTrue);
     expect(isWeakPin('3791'), isFalse);

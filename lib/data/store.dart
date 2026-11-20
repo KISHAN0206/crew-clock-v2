@@ -16,7 +16,8 @@ class Store extends ChangeNotifier {
   Store._();
   static final Store instance = Store._();
 
-  static const idPrefix = 'JB-';
+  /// Shown as an example in the ID box. New worker IDs are 4-digit numbers.
+  static const idExample = '4821';
 
   late Database _db;
   late Directory _photos;
@@ -116,7 +117,7 @@ class Store extends ChangeNotifier {
   String _newWorkerId() {
     String id;
     do {
-      id = '$idPrefix${randomString('0123456789', 4)}';
+      id = '${randomString('123456789', 1)}${randomString('0123456789', 3)}'; // 1000–9999
     } while (workers.containsKey(id));
     return id;
   }

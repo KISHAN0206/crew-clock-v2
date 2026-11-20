@@ -91,7 +91,7 @@ class _KioskScreenState extends State<KioskScreen> {
   // ---------- sign in ----------
 
   void _signIn() {
-    final id = normaliseWorkerId(idCtrl.text);
+    final id = matchWorkerId(idCtrl.text, store.workers.keys) ?? normaliseWorkerId(idCtrl.text);
     final pin = pinCtrl.text.trim();
     final w = store.workers[id];
     if (w != null && !w.isSetUp) {
@@ -272,7 +272,8 @@ class _KioskScreenState extends State<KioskScreen> {
           const SizedBox(height: 16),
           TextField(
             controller: idCtrl,
-            decoration: _dec('Worker ID', hint: '${Store.idPrefix}0000'),
+            decoration: _dec('Worker ID', hint: Store.idExample),
+            keyboardType: TextInputType.number,
             textCapitalization: TextCapitalization.characters,
             autocorrect: false,
             style: const TextStyle(fontSize: 20, letterSpacing: 2),

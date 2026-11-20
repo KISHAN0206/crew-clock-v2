@@ -12,7 +12,7 @@ class Worker {
     this.setupAt,
   });
 
-  final String id; // e.g. JB-4821
+  final String id; // e.g. 4821 (older workers: JB-4821)
   String name;
   String role;
   bool active;

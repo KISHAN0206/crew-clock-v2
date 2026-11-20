@@ -20,9 +20,22 @@ bool isWeakPin(String pin) {
   return false;
 }
 
-/// Accepts "jb4821", "JB 4821" or "JB-4821" and returns "JB-4821".
+/// Worker IDs are plain numbers like "4821". Older IDs like "JB-4821" still work:
+/// "jb4821", "JB 4821" and "JB-4821" all become "JB-4821".
 String normaliseWorkerId(String raw) {
   final s = raw.trim().toUpperCase().replaceAll(' ', '');
   final m = RegExp(r'^([A-Z]{2})-?(\d+)$').firstMatch(s);
   return m == null ? s : '${m.group(1)}-${m.group(2)}';
+}
+
+/// Finds a worker by what they typed. Typing just the number also finds an older "JB-4821" style ID.
+String? matchWorkerId(String raw, Iterable<String> ids) {
+  final id = normaliseWorkerId(raw);
+  final all = ids.toSet();
+  if (all.contains(id)) return id;
+  if (RegExp(r'^\d+$').hasMatch(id)) {
+    final older = all.where((x) => RegExp('^[A-Z]{2}-$id\$').hasMatch(x)).toList();
+    if (older.length == 1) return older.first;
+  }
+  return null;
 }
