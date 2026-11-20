@@ -7,6 +7,8 @@ The QR-code version is kept on the `qr-version` branch.
 
 ## Quick links (copy from here)
 
+**[⬇ Download the app](https://github.com/KISHAN0206/crew-clock-v2/releases/latest/download/crew-clock-32bit.apk)** · see also `DOWNLOAD-APP.md`
+
 **1. Install the app on the tablet** (open this in the tablet's Chrome):
 
 ```
