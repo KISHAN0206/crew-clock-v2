@@ -7,37 +7,27 @@ The QR-code version is kept on the `qr-version` branch.
 
 ## Quick links (copy from here)
 
-**Install the app on a tablet** (open in the tablet's Chrome, signed in to GitHub, because this repository is private):
+**1. Install the app on the tablet** (open this in the tablet's Chrome):
 
 ```
 https://github.com/KISHAN0206/crew-clock-v2/releases/latest/download/crew-clock-32bit.apk
 ```
 
-Newer/64-bit devices:
+If that one won't install, use the 64-bit one:
 
 ```
 https://github.com/KISHAN0206/crew-clock-v2/releases/latest/download/crew-clock-64bit.apk
 ```
 
-Works on any device (bigger file):
-
-```
-https://github.com/KISHAN0206/crew-clock-v2/releases/latest/download/crew-clock-all-devices.apk
-```
-
-**Web version of the QR clock-in station** (only for the QR version):
-
-```
-https://kishan0206.github.io/crew-clock-scan/station.html
-```
-
-**Google Sheet link for the app** (Manager → Cloud sync). Add your sync key to the end:
+**2. Connect the Google Sheet** (app → Manager → Cloud sync). Replace `YOUR_SYNC_KEY` with your key:
 
 ```
 https://script.google.com/macros/s/AKfycbzxzbvDXtgiIy0Pi_hYcrmnSEPWxz7pzQCWUWBb4tnjsM2fICLh_1-klrTsPLbaceBMgQ/exec?key=YOUR_SYNC_KEY
 ```
 
-The full link with the key is kept in the private `crew-clock` repository (`TABLET-LINK.md`), because this repository is public.
+The key isn't written here because anyone can read this page. If the repository is made private, these
+download links only work while signed in to GitHub.
+
 
 Staff clock in / clock out for a shared tablet.
 
